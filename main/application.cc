@@ -1210,6 +1210,9 @@ void Application::Alert(const char* status, const char* message, const char* emo
     display->SetStatus(status);
     display->SetEmotion(emotion);
     display->SetChatMessage("system", message);
+#ifdef CONFIG_BOARD_TYPE_JIUCHUAN
+    display->ShowNotification(message, 5000);
+#endif
     if (!sound.empty()) {
         audio_service_.PlaySound(sound);
     }

@@ -28,7 +28,7 @@ public:
         viewport_ = lv_obj_create(root_);
         lv_obj_remove_style_all(viewport_);
         lv_obj_set_size(viewport_, width - 12,
-            std::max(1, (height - 48) / text_font->line_height) * text_font->line_height);
+            std::max(1, (height - 48) / int(text_font->line_height)) * int(text_font->line_height));
         lv_obj_set_pos(viewport_, 6, 26);
         lv_obj_remove_flag(viewport_, LV_OBJ_FLAG_SCROLLABLE);
         body_ = Label(viewport_);
@@ -77,7 +77,7 @@ public:
         // Assets replace the boot subset with the complete Chinese font.
         // Explicit root styles must follow that replacement as well.
         lv_obj_set_style_text_font(root_, font, 0);
-        lv_obj_set_height(viewport_, std::max(1, (height_ - 48) / font->line_height) * font->line_height);
+        lv_obj_set_height(viewport_, std::max(1, (height_ - 48) / int(font->line_height)) * int(font->line_height));
         if (has_view_) LayoutContent();
     }
 

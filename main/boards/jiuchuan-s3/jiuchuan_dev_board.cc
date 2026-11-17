@@ -345,6 +345,8 @@ public:
     void SetGuideView(const GuideView& view) override {
         DisplayLockGuard lock(this);
         guide_view_ = view;
+        if (content_footer_label_ && view.page != GuidePage::Legacy)
+            lv_obj_add_flag(content_footer_label_, LV_OBJ_FLAG_HIDDEN);
         ApplyGuideView();
     }
 
@@ -529,7 +531,8 @@ public:
         if (content_footer_label_ == nullptr) {
             return;
         }
-        const bool visible = footer != nullptr && footer[0] != '\0';
+        const bool visible = footer != nullptr && footer[0] != '\0' &&
+            guide_view_.page == GuidePage::Legacy;
         lv_label_set_text(content_footer_label_, visible ? footer : "");
         if (visible) {
             lv_obj_remove_flag(content_footer_label_, LV_OBJ_FLAG_HIDDEN);
