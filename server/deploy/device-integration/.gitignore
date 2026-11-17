@@ -1,0 +1,7 @@
+*.jar
+*.tar.gz
+*.json
+*.log
+backup/
+proxy-backup/
+__pycache__/

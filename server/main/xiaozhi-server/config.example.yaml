@@ -1,0 +1,16 @@
+# Base configuration for the manager-api deployment mode.
+# Copy to config.yaml; also create data/.config.yaml from config_from_api.example.yaml.
+# Model/provider configuration is loaded from manager-api in this mode.
+server:
+  ip: 0.0.0.0
+  port: 8000
+  http_port: 8003
+  vision_explain: http://127.0.0.1:8003/mcp/vision/explain
+  timezone_offset: 8
+log:
+  log_level: INFO
+  log_dir: tmp
+  log_file: server.log
+  data_dir: data
+delete_audio: true
+prompt_template: agent-base-prompt.txt

@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!core/
+!core/**
+!tests/
+!tests/**

@@ -1,0 +1,174 @@
+{
+  "info": {
+    "name": "Vanex S3 - OTA Check and Download - 2026-10-22",
+    "description": "Existing device OTA protocol. No API Key or login token. Device-Id must be the actual MAC, not IMEI/cabGuid. Use the real installed version: POST updates server-side reported version/connection time. These requests do not push an upgrade to a remote device. Download tickets and returned connection credentials are sensitive. Clear runtime variables before sharing.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {"type": "noauth"},
+  "variable": [
+    {"key": "otaBaseUrl", "value": "https://robot.suji.work/xiaozhi"},
+    {"key": "deviceMac", "value": ""},
+    {"key": "currentVersion", "value": ""},
+    {"key": "boardType", "value": "jiuchuan-s3"},
+    {"key": "otaDownloadUrl", "value": ""},
+    {"key": "otaTargetVersion", "value": ""},
+    {"key": "otaStatus", "value": ""},
+    {"key": "otaETag", "value": ""},
+    {"key": "otaSha256", "value": ""},
+    {"key": "otaTotalBytes", "value": ""},
+    {"key": "otaResumeOffset", "value": ""}
+  ],
+  "item": [
+    {
+      "name": "1 - Service health (not a version check)",
+      "request": {
+        "method": "GET",
+        "auth": {"type": "noauth"},
+        "url": "{{otaBaseUrl}}/ota/",
+        "description": "Returns a text health message. It does not select firmware."
+      }
+    },
+    {
+      "name": "2 - Check device OTA",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {"type": "text/javascript", "exec": [
+            "for (const key of ['otaDownloadUrl','otaTargetVersion','otaStatus','otaETag','otaSha256','otaTotalBytes','otaResumeOffset']) pm.collectionVariables.set(key, '');",
+            "const mac = pm.variables.get('deviceMac') || '';",
+            "const version = pm.variables.get('currentVersion') || '';",
+            "if (!/^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(mac)) throw new Error('Set deviceMac to the actual colon-separated MAC, not IMEI or cabGuid.');",
+            "if (!/^[0-9]{1,9}(\\.[0-9]{1,9}){0,3}(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$/.test(version)) throw new Error('Set currentVersion to the real installed firmware version.');",
+            "if (pm.variables.get('boardType') !== 'jiuchuan-s3') throw new Error('This collection is for the jiuchuan-s3 board.');",
+            "if (!['https://robot.suji.work/xiaozhi','http://47.94.91.32:8002/xiaozhi'].includes(pm.variables.get('otaBaseUrl'))) throw new Error('Unexpected OTA origin.');"
+          ]}
+        },
+        {
+          "listen": "test",
+          "script": {"type": "text/javascript", "exec": [
+            "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+            "if (pm.response.code !== 200) throw new Error('OTA HTTP error; do not download.');",
+            "const body = pm.response.json();",
+            "if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Invalid OTA response.');",
+            "if (body.error || (body.code !== undefined && Number(body.code) !== 0)) throw new Error(body.error || body.msg || 'OTA server error');",
+            "if (!body.websocket && !body.mqtt && !body.activation) throw new Error('Missing device configuration.');",
+            "const firmware = body.firmware;",
+            "if (body.activation) {",
+            "  pm.collectionVariables.set('otaStatus', 'activation_required');",
+            "} else if (!firmware) {",
+            "  pm.collectionVariables.set('otaStatus', 'no_firmware_check_auto_update_and_board');",
+            "} else if (!firmware.url || firmware.url.includes('NOT_ACTIVATED_FIRMWARE_THIS_IS_A_INVALID_URL')) {",
+            "  pm.collectionVariables.set('otaStatus', 'no_update_url');",
+            "} else {",
+            "  const parse = value => {",
+            "    if (typeof value !== 'string' || !/^[0-9]{1,9}(\\.[0-9]{1,9}){0,3}(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$/.test(value)) throw new Error('Invalid firmware version.');",
+            "    return value.split(/[-+]/)[0].split('.').map(Number);",
+            "  };",
+            "  const installed = parse(pm.variables.get('currentVersion'));",
+            "  const target = parse(firmware.version);",
+            "  let comparison = 0;",
+            "  for (let i = 0; i < Math.max(installed.length, target.length); i++) {",
+            "    const delta = (target[i] || 0) - (installed[i] || 0);",
+            "    if (delta) { comparison = Math.sign(delta); break; }",
+            "  }",
+            "  if (comparison <= 0) throw new Error('Returned URL is not for a newer numeric version; inspect before downloading.');",
+            "  if (!new RegExp('^https://robot[.]suji[.]work/xiaozhi/otaMag/download/[0-9a-f-]+$', 'i').test(firmware.url)) throw new Error('Unexpected download URL.');",
+            "  pm.collectionVariables.set('otaDownloadUrl', firmware.url);",
+            "  pm.collectionVariables.set('otaTargetVersion', firmware.version);",
+            "  pm.collectionVariables.set('otaStatus', 'update_available');",
+            "}",
+            "pm.test('OTA response parsed; inspect otaStatus', () => pm.expect(pm.collectionVariables.get('otaStatus')).not.to.eql(''));"
+          ]}
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "auth": {"type": "noauth"},
+        "url": "{{otaBaseUrl}}/ota/",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"},
+          {"key": "Device-Id", "value": "{{deviceMac}}"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"application\": {\"version\": \"{{currentVersion}}\"},\n  \"board\": {\"type\": \"{{boardType}}\"}\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "description": "No Client-Id is required for this diagnostic request. The endpoint is not read-only: it updates reported firmware version and last connection time. This does not remotely start a firmware installation."
+      }
+    },
+    {
+      "name": "3 - Download first 64 KiB",
+      "event": [
+        {"listen": "prerequest", "script": {"type": "text/javascript", "exec": [
+          "for (const key of ['otaETag','otaSha256','otaTotalBytes','otaResumeOffset']) pm.collectionVariables.set(key, '');",
+          "if (!new RegExp('^https://robot[.]suji[.]work/xiaozhi/otaMag/download/[0-9a-f-]+$', 'i').test(pm.variables.get('otaDownloadUrl') || '')) throw new Error('Run the OTA check first and obtain a valid update URL.');"
+        ]}},
+        {"listen": "test", "script": {"type": "text/javascript", "exec": [
+          "pm.test('HTTP 206', () => pm.response.to.have.status(206));",
+          "const match = new RegExp('^bytes 0-65535/([0-9]+)$').exec(pm.response.headers.get('Content-Range') || '');",
+          "const etag = pm.response.headers.get('ETag') || '';",
+          "const hash = pm.response.headers.get('X-Firmware-SHA256') || '';",
+          "if (pm.response.code !== 206 || !match || Number(match[1]) <= 65536 || Number(pm.response.headers.get('Content-Length')) !== 65536 || !/^[0-9a-f]{64}$/.test(hash) || etag !== '\"' + hash + '\"') throw new Error('Range response identity/length mismatch.');",
+          "pm.collectionVariables.set('otaETag', etag);",
+          "pm.collectionVariables.set('otaSha256', hash);",
+          "pm.collectionVariables.set('otaTotalBytes', match[1]);",
+          "pm.collectionVariables.set('otaResumeOffset', '65536');"
+        ]}}
+      ],
+      "request": {
+        "method": "GET",
+        "auth": {"type": "noauth"},
+        "url": "{{otaDownloadUrl}}",
+        "header": [{"key": "Accept-Encoding", "value": "identity"}, {"key": "Range", "value": "bytes=0-65535"}],
+        "description": "Checks the first chunk and saves the ETag, total size and next offset. This response alone is not a complete firmware image."
+      }
+    },
+    {
+      "name": "4 - Download remaining bytes",
+      "event": [
+        {"listen": "prerequest", "script": {"type": "text/javascript", "exec": [
+          "if (!new RegExp('^https://robot[.]suji[.]work/xiaozhi/otaMag/download/[0-9a-f-]+$', 'i').test(pm.variables.get('otaDownloadUrl') || '')) throw new Error('Missing valid OTA URL.');",
+          "if (pm.variables.get('otaResumeOffset') !== '65536' || !/^\"[0-9a-f]{64}\"$/.test(pm.variables.get('otaETag') || '')) throw new Error('Run the first-chunk request successfully before resuming.');"
+        ]}},
+        {"listen": "test", "script": {"type": "text/javascript", "exec": [
+          "if (pm.response.code === 200) throw new Error('Server returned a full image: restart from byte 0, never append this response.');",
+          "pm.test('HTTP 206', () => pm.response.to.have.status(206));",
+          "const total = Number(pm.variables.get('otaTotalBytes'));",
+          "const offset = Number(pm.variables.get('otaResumeOffset'));",
+          "if (pm.response.code !== 206 || pm.response.headers.get('Content-Range') !== 'bytes ' + offset + '-' + (total - 1) + '/' + total || Number(pm.response.headers.get('Content-Length')) !== total - offset || pm.response.headers.get('ETag') !== pm.variables.get('otaETag') || pm.response.headers.get('X-Firmware-SHA256') !== pm.variables.get('otaSha256')) throw new Error('Resume range or firmware identity mismatch.');"
+        ]}}
+      ],
+      "request": {
+        "method": "GET",
+        "auth": {"type": "noauth"},
+        "url": "{{otaDownloadUrl}}",
+        "header": [
+          {"key": "Accept-Encoding", "value": "identity"},
+          {"key": "Range", "value": "bytes={{otaResumeOffset}}-"},
+          {"key": "If-Range", "value": "{{otaETag}}"}
+        ],
+        "description": "Downloads only the remaining bytes. Postman does not merge this with the first chunk. Use the full-download request for a standalone app file."
+      }
+    },
+    {
+      "name": "5 - Download full OTA application",
+      "event": [
+        {"listen": "prerequest", "script": {"type": "text/javascript", "exec": [
+          "if (!new RegExp('^https://robot[.]suji[.]work/xiaozhi/otaMag/download/[0-9a-f-]+$', 'i').test(pm.variables.get('otaDownloadUrl') || '')) throw new Error('Run the OTA check first and obtain an update URL.');"
+        ]}},
+        {"listen": "test", "script": {"type": "text/javascript", "exec": [
+          "pm.test('HTTP 200 full app', () => pm.response.to.have.status(200));",
+          "if (pm.response.code !== 200 || !(pm.response.headers.get('Content-Type') || '').startsWith('application/octet-stream') || !/^[0-9a-f]{64}$/.test(pm.response.headers.get('X-Firmware-SHA256') || '')) throw new Error('Not a valid firmware download response.');"
+        ]}}
+      ],
+      "request": {
+        "method": "GET",
+        "auth": {"type": "noauth"},
+        "url": "{{otaDownloadUrl}}",
+        "header": [{"key": "Accept-Encoding", "value": "identity"}],
+        "description": "Use Send and Download for the complete xiaozhi.bin app. Verify the saved file SHA-256 against X-Firmware-SHA256. This app is not the full-flash image for address 0x0."
+      }
+    }
+  ]
+}

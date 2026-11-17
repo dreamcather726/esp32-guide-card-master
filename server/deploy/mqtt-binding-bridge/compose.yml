@@ -1,0 +1,24 @@
+services:
+  mqtt-binding-bridge:
+    build: .
+    image: vanex-mqtt-binding-bridge:20261004
+    container_name: vanex-mqtt-binding-bridge
+    network_mode: host
+    restart: unless-stopped
+    env_file: bridge.env
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - ./api-secret:/run/secrets/api-secret:ro
+      - ./state:/state
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: [CMD, python, -c, "import json,time; h=json.load(open('/state/health.json')); assert time.time()-h['updated']<60 and h['mqtt'] and h['subscribed']"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

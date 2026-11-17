@@ -1,0 +1,3 @@
+services:
+  xiaozhi-esp32-server:
+    image: xiaozhi-esp32-server:custom-20261002-user-binding

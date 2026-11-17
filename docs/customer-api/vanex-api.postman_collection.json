@@ -1,0 +1,104 @@
+{
+  "info": {
+    "name": "Vanex S3 - Customer API - 2026-10-22",
+    "description": "Set apiKey to the complete apiKey from the private customer-api-key.json file, not keyId. Includes profile and integration APIs. Execute requests individually: PUT changes data and DELETE permanently clears history and closes the selected device connection. Do not run the whole collection.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {"key": "baseUrl", "value": "https://robot.suji.work/xiaozhi/integration"},
+    {"key": "profileBaseUrl", "value": "https://robot.suji.work/xiaozhi/user/profile"},
+    {"key": "apiKey", "value": ""},
+    {"key": "userGUID", "value": ""},
+    {"key": "agentId", "value": "ce9307e119034a219459334df1fff0e8"},
+    {"key": "deviceId", "value": ""},
+    {"key": "roleId", "value": ""}
+  ],
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {"key": "key", "value": "X-API-Key", "type": "string"},
+      {"key": "value", "value": "{{apiKey}}", "type": "string"},
+      {"key": "in", "value": "header", "type": "string"}
+    ]
+  },
+  "item": [
+    {
+      "name": "Profile - Exact query",
+      "request": {
+        "method": "GET",
+        "url": "{{profileBaseUrl}}/{{userGUID}}",
+        "description": "Requires profile scope. data is one object or null. Set the exact userGUID."
+      }
+    },
+    {
+      "name": "Profile - Prefix query (maximum 30)",
+      "request": {
+        "method": "GET",
+        "url": "{{profileBaseUrl}}/{{userGUID}}?match=prefix",
+        "description": "Requires profile scope. data is an array, including for zero or one result. Matches the exact ID and IDs starting with the supplied prefix; case-sensitive."
+      }
+    },
+    {
+      "name": "Profile - Create or update one user",
+      "request": {
+        "method": "PUT",
+        "url": "{{profileBaseUrl}}/{{userGUID}}",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"nickname\": \"张先生\",\n  \"language\": \"zh-CN\",\n  \"interests\": \"历史文化、建筑\",\n  \"explanationStyle\": \"普通话，简短讲解，追问时展开。\",\n  \"relationship\": \"我自己\",\n  \"usageCount\": 3\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "description": "Requires profile scope. Replace the example values and use the exact userGUID, never a prefix. The four original fields are cleared if omitted. Omitted/null relationship and usageCount preserve existing values. usageCount is a client-supplied nonnegative integer, not an automatic counter. Rebind the user to load the new profile into a device session."
+      }
+    },
+    {
+      "name": "1 - List agent roles",
+      "request": {"method": "GET", "url": "{{baseUrl}}/agents/{{agentId}}/roles"}
+    },
+    {
+      "name": "2 - Replace role media URLs",
+      "request": {
+        "method": "PUT",
+        "url": "{{baseUrl}}/agents/{{agentId}}/roles/{{roleId}}/media",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"imageUrl\": \"https://example.com/role/avatar.png\",\n  \"videoUrl\": \"https://example.com/role/avatar.mp4\",\n  \"audioUrl\": \"https://example.com/role/audition.mp3\"\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "description": "Replace all three URLs. Omitted or null fields clear the saved URL. Set real media addresses before sending."
+      }
+    },
+    {
+      "name": "3 - Query saved device role",
+      "request": {"method": "GET", "url": "{{baseUrl}}/devices/{{deviceId}}/role-binding"}
+    },
+    {
+      "name": "4 - Bind role to one device",
+      "request": {
+        "method": "PUT",
+        "url": "{{baseUrl}}/devices/{{deviceId}}/role-binding",
+        "header": [{"key": "Content-Type", "value": "application/json"}],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"agentId\": \"{{agentId}}\",\n  \"roleId\": \"{{roleId}}\"\n}",
+          "options": {"raw": {"language": "json"}}
+        },
+        "description": "The device must already belong to this agent. Inspect data.runtimeStatus for immediate delivery; saved bindings load on reconnect."
+      }
+    },
+    {
+      "name": "5 - Query device conversations",
+      "request": {"method": "GET", "url": "{{baseUrl}}/devices/{{deviceId}}/chat-history?page=1&limit=30"}
+    },
+    {
+      "name": "6 - Permanently clear selected device conversations",
+      "request": {
+        "method": "DELETE",
+        "url": "{{baseUrl}}/devices/{{deviceId}}/chat-history?confirm=true",
+        "description": "Irreversible deletion for this device only. Closes its live voice connection. Does not delete profiles or long-term memory. Review deviceId before sending."
+      }
+    }
+  ]
+}

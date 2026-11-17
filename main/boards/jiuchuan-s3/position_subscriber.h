@@ -1,0 +1,35 @@
+#pragma once
+#include "position_data.h"
+#include <atomic>
+#include <functional>
+#include <mutex>
+#include <mqtt_client.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+class RndisBoard;
+
+// Receives ML307C telemetry independently of the customer WSS credentials.
+// It never publishes position data or subscribes to another device's IMEI.
+class PositionSubscriber {
+public:
+    PositionSubscriber(RndisBoard& board, std::function<bool()> network_ready);
+    ~PositionSubscriber();
+    void Start();
+private:
+    RndisBoard& board_;
+    std::function<bool()> network_ready_;
+    std::atomic<bool> stopping_{false}, running_{false};
+    int64_t received_at_ = 0;  // Protected by navigation_mutex_, including expiry.
+    std::mutex navigation_mutex_;
+    esp_mqtt_client_handle_t client_ = nullptr;
+    std::string imei_, topic_, client_id_;
+    position::Message message_;
+    bool StartClient(const std::string& imei);
+    void StopClient();
+    void Run();
+    bool UpdateSignal();
+    void ClearPosition();
+    static void Event(void*, esp_event_base_t, int32_t, void*);
+    void HandleEvent(int32_t event_id, esp_mqtt_event_handle_t event);
+};

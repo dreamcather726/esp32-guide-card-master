@@ -1,0 +1,15 @@
+server:
+  ip: 0.0.0.0
+  port: 8000
+  http_port: 8003
+  vision_explain: http://127.0.0.1:8003/mcp/vision/explain
+
+manager-api:
+  # Docker deployment example:
+  # http://xiaozhi-esp32-server-web:8002/xiaozhi
+  url: http://127.0.0.1:8002/xiaozhi
+  # Copy the current server.secret from manager-api parameter management.
+  secret: CHANGE_ME
+
+prompt_template: agent-base-prompt.txt
+
