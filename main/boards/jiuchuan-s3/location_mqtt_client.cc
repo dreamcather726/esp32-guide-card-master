@@ -10,6 +10,7 @@
 #include "sd_content_manager.h"
 #include "system_info.h"
 #include "user_binding_json.h"
+#include "position_subscriber.h"
 
 #include <cJSON.h>
 #include <esp_app_desc.h>
@@ -47,9 +48,7 @@ constexpr const char* kCredentialsUrl =
     "http://mqttak.suji.work:8443/api/credentials";
 constexpr const char* kSettingsNamespace = "cab_mqtt";
 constexpr const char* kOnlineTopic = "device/broadcast/online";
-// The customer MQTT task starts with the board, but credentials must wait for
-// DHCP. This replaces the old fixed 60-second startup delay.
-constexpr uint32_t kNetworkReadyWaitMs = 90000;
+// One worker services both clients after the existing startup gate.
 constexpr uint32_t kRetryDelayMs = 2000;
 constexpr uint32_t kUnauthorizedRetryDelayMs = 30000;
 constexpr uint32_t kConnectWaitMs = 30000;
@@ -332,7 +331,8 @@ void AddString(cJSON* root, const char* key, const std::string& value) {
 
 }  // namespace
 
-LocationMqttClient::LocationMqttClient(RndisBoard& board) : board_(board) {
+LocationMqttClient::LocationMqttClient(RndisBoard& board, std::function<bool()> network_ready)
+    : board_(board), position_subscriber_(std::make_unique<PositionSubscriber>(board, std::move(network_ready))) {
     Settings settings(kSettingsNamespace);
     group_id_ = settings.GetString("group_id");
     // Historical user_guid in NVS is deliberately not an active boot identity.
@@ -351,6 +351,7 @@ LocationMqttClient::LocationMqttClient(RndisBoard& board) : board_(board) {
 
 LocationMqttClient::~LocationMqttClient() {
     Stop();
+    position_subscriber_.reset();
     content_manager_.reset();
 }
 
@@ -361,15 +362,17 @@ void LocationMqttClient::ReplayContent(bool previous) {
 }
 
 void LocationMqttClient::Start() {
-    if (task_handle_ != nullptr) {
+    if (running_.exchange(true)) {
         ESP_LOGW(kTag, "customer MQTT task is already running");
         return;
     }
 
     stop_requested_ = false;
+    ESP_LOGI(kTag, "Shared MQTT manager: position polling reuses cabinet_mqtt; saved internal stack=6144 bytes");
     if (xTaskCreate(TaskEntry, "cabinet_mqtt", 12288, this, 3,
                     &task_handle_) != pdPASS) {
         task_handle_ = nullptr;
+        running_ = false;
         ESP_LOGE(kTag, "failed to create customer MQTT task");
     }
 }
@@ -379,10 +382,11 @@ void LocationMqttClient::Stop() {
     TaskHandle_t task = task_handle_;
     if (task != nullptr) {
         xTaskNotifyGive(task);
-        for (int attempt = 0; attempt < 100 && task_handle_ != nullptr; ++attempt) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
     }
+    // HTTP/AT work can take more than one second. Join before releasing the
+    // positioning client that this worker now services.
+    while (running_) vTaskDelay(pdMS_TO_TICKS(10));
+    task_handle_ = nullptr;
     PersistRuntimeCheckpoint();
     StopMqtt();
 }
@@ -390,34 +394,33 @@ void LocationMqttClient::Stop() {
 void LocationMqttClient::TaskEntry(void* arg) {
     auto* client = static_cast<LocationMqttClient*>(arg);
     client->Run();
+    // Quiesce business MQTT callbacks before releasing their notification task.
+    client->StopMqtt();
     client->task_handle_ = nullptr;
+    client->running_ = false;
     vTaskDelete(nullptr);
 }
 
 bool LocationMqttClient::WaitOrStop(uint32_t delay_ms) {
-    if (stop_requested_) {
-        return true;
+    const int64_t deadline = esp_timer_get_time() + int64_t(delay_ms) * 1000;
+    while (!stop_requested_) {
+        // Keep the independent position connection/CSQ alive even during
+        // long credential retries, without a second 6144-byte worker stack.
+        position_subscriber_->Poll();
+        const int64_t remaining_ms = (deadline - esp_timer_get_time()) / 1000;
+        if (remaining_ms <= 0) break;
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(std::min<int64_t>(remaining_ms, 1000)))) break;
     }
-    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(delay_ms));
     return stop_requested_;
 }
 
 void LocationMqttClient::Run() {
     uint32_t credential_failures = 0;
     while (!stop_requested_) {
+        position_subscriber_->Poll();
         if (board_.IsCellularNetwork() && !board_.IsNetworkReady()) {
-            ESP_LOGI(kTag,
-                     "waiting for USB RNDIS network IP before requesting MQTT credentials");
-            if (!board_.WaitForNetworkReady(kNetworkReadyWaitMs)) {
-                ESP_LOGW(kTag,
-                         "USB RNDIS network did not become ready within %u ms",
-                         kNetworkReadyWaitMs);
-                if (WaitOrStop(kRetryDelayMs)) {
-                    break;
-                }
-                continue;
-            }
-            ESP_LOGI(kTag, "USB RNDIS network is ready; requesting MQTT credentials now");
+            if (WaitOrStop(1000)) break;
+            continue;
         }
 
         const std::string physical_imei = board_.GetImei();

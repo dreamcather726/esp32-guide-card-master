@@ -12,7 +12,6 @@
 #include "settings.h"
 #include "startup_qr_jpeg.h"
 #include "startup_flow.h"
-#include "position_subscriber.h"
 #include "navigation_overlay.h"
 #include "guide_pages.h"
 #include <ssid_manager.h>
@@ -603,7 +602,6 @@ private:
     TaskHandle_t tf_init_task_handle_ = nullptr;
     TaskHandle_t tf_qr_task_handle_ = nullptr;
     std::unique_ptr<LocationMqttClient> location_mqtt_client_;
-    std::unique_ptr<PositionSubscriber> position_subscriber_;
     std::unique_ptr<CircularStrip> external_rgb_;
     std::mutex rgb_mutex_;
 
@@ -1379,7 +1377,9 @@ private:
 
     void StartBusinessMqtt() {
         if (startup_network_started_ && !location_mqtt_client_) {
-            location_mqtt_client_ = std::make_unique<LocationMqttClient>(*this);
+            location_mqtt_client_ = std::make_unique<LocationMqttClient>(*this, [this]() {
+                return startup_network_ready_.load();
+            });
             location_mqtt_client_->Start();
         }
     }
@@ -1396,12 +1396,6 @@ private:
             if (cellular_network_) RndisBoard::StartNetwork();
             else if (wifi_board_) wifi_board_->StartNetwork();
             startup_transport_started_ = true;
-            if (!position_subscriber_) {
-                position_subscriber_ = std::make_unique<PositionSubscriber>(*this, [this]() {
-                    return startup_network_ready_.load();
-                });
-                position_subscriber_->Start();
-            }
         }
         if (actions.start_business && startup_pending_.exchange(false)) {
             ESP_LOGI(BOARD_TAG, "[BOOT_FLOW] QR presentation and audio preparation resolved");
@@ -1548,7 +1542,6 @@ public:
     }
 
     ~JiuchuanDevBoard() override {
-        position_subscriber_.reset();
         if (tf_qr_task_handle_) {
             vTaskDelete(tf_qr_task_handle_);
         }

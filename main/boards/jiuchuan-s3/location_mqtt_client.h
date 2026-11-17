@@ -10,15 +10,17 @@
 #include <mutex>
 #include <string>
 #include <memory>
+#include <functional>
 
 class RndisBoard;
 class SdContentManager;
+class PositionSubscriber;
 
 // Customer MQTT client. The historical class/file name is retained so the
 // board integration stays small, but this no longer performs GNSS reporting.
 class LocationMqttClient {
 public:
-    explicit LocationMqttClient(RndisBoard& board);
+    explicit LocationMqttClient(RndisBoard& board, std::function<bool()> network_ready);
     ~LocationMqttClient();
 
     LocationMqttClient(const LocationMqttClient&) = delete;
@@ -42,6 +44,7 @@ private:
 
     RndisBoard& board_;
     TaskHandle_t task_handle_ = nullptr;
+    std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> connected_{false};
     std::atomic<bool> report_requested_{false};
@@ -52,6 +55,7 @@ private:
     esp_mqtt_client_handle_t mqtt_client_ = nullptr;
     Credentials active_credentials_;
     std::unique_ptr<SdContentManager> content_manager_;
+    std::unique_ptr<PositionSubscriber> position_subscriber_;
 
     std::string physical_imei_;
     std::string cab_guid_;

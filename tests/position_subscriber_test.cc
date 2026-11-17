@@ -6,9 +6,12 @@
 #include <vector>
 #include <mutex>
 #include <cstdio>
+#include <memory>
 
 using esp_err_t = int;
 constexpr int ESP_OK = 0, pdPASS = 1;
+constexpr int pdTRUE = 1;
+using TaskHandle_t = void*;
 constexpr int MQTT_EVENT_ANY = -1, MQTT_EVENT_CONNECTED = 1, MQTT_EVENT_DISCONNECTED = 2,
               MQTT_EVENT_DATA = 3, MQTT_EVENT_ERROR = 4, MQTT_EVENT_BEFORE_CONNECT = 5,
               MQTT_EVENT_SUBSCRIBED = 6;
@@ -43,6 +46,9 @@ static std::string topic, client_id;
 static int starts = 0, stops = 0, destroys = 0, subscriptions = 0;
 static bool init_success = true;
 static int register_result = ESP_OK, start_result = ESP_OK;
+// Stack-only budget model: count the unchanged MQTT and manager stacks.
+static int internal_budget = -1, internal_used = 0, internal_peak = 0;
+static bool mqtt_stack_allocated = false;
 static void (*event_callback)(void*, const char*, int32_t, void*) = nullptr;
 static void* event_argument = nullptr;
 static Client client;
@@ -50,15 +56,29 @@ static Client* esp_mqtt_client_init(const esp_mqtt_client_config_t* config) {
     assert(std::string(config->broker.address.uri) == "mqtt://example.test:1883");
     assert(std::string(config->credentials.username) == "unit-test");
     assert(std::string(config->credentials.authentication.password) == "fake-password");
+    assert(config->task.stack_size == 4096); // Keep MQTT's original stack size.
     client_id = config->credentials.client_id;
     return init_success ? &client : nullptr;
 }
 static int esp_mqtt_client_register_event(Client*, int, decltype(event_callback) callback, void* argument) {
     event_callback = callback; event_argument = argument; return register_result;
 }
-static int esp_mqtt_client_start(Client*) { ++starts; return start_result; }
+static int esp_mqtt_client_start(Client*) {
+    ++starts;
+    if (start_result != ESP_OK) return start_result;
+    if (internal_budget >= 0) {
+        if (internal_used + 4096 > internal_budget) return -1;
+        internal_used += 4096; internal_peak = std::max(internal_peak, internal_used);
+        mqtt_stack_allocated = true;
+    }
+    return ESP_OK;
+}
 static int esp_mqtt_client_stop(Client*) { ++stops; return ESP_OK; }
-static int esp_mqtt_client_destroy(Client*) { ++destroys; return ESP_OK; }
+static int esp_mqtt_client_destroy(Client*) {
+    ++destroys;
+    if (mqtt_stack_allocated) { internal_used -= 4096; mqtt_stack_allocated = false; }
+    return ESP_OK;
+}
 static int esp_mqtt_client_subscribe(Client*, const char* value, int qos) {
     assert(qos == 0); topic = value; ++subscriptions; return 42;
 }
@@ -77,8 +97,20 @@ static size_t heap_caps_get_free_size(unsigned caps) { return caps == MALLOC_CAP
 static size_t heap_caps_get_largest_free_block(unsigned) { return 3000; }
 static std::function<void()> on_delay;
 static void vTaskDelay(int ms) { now_us += static_cast<int64_t>(ms) * 1000; if (on_delay) on_delay(); }
-static void vTaskDelete(void*) {}
-static int xTaskCreate(void (*)(void*), const char*, int, void*, int, void*) { return pdPASS; }
+static std::function<void()> manager_task;
+static int management_tasks = 0;
+static void vTaskDelete(void*) { if (internal_budget >= 0) internal_used -= 12288; }
+static int xTaskCreate(void (*entry)(void*), const char* name, int stack, void* argument, int, TaskHandle_t* handle) {
+    assert(std::string(name) == "cabinet_mqtt" && stack == 12288);
+    if (internal_budget >= 0 && internal_used + stack > internal_budget) return 0;
+    ++management_tasks;
+    if (internal_budget >= 0) { internal_used += stack; internal_peak = std::max(internal_peak, internal_used); }
+    *handle = reinterpret_cast<void*>(1);
+    manager_task = [=]() { entry(argument); };
+    return pdPASS;
+}
+static int ulTaskNotifyTake(int, int ticks) { vTaskDelay(ticks); return 0; }
+static void xTaskNotifyGive(TaskHandle_t) {}
 struct Display {
     NavigationStatus navigation;
     int signal = -1, updates = 0;
@@ -114,6 +146,34 @@ struct RndisBoard {
 #include "subscriber.inc"
 #undef private
 #include "broker_log.inc"
+
+constexpr uint32_t kRetryDelayMs = 2000, kUnauthorizedRetryDelayMs = 30000,
+    kConnectWaitMs = 30000, kReconnectGraceMs = 60000, kOnlineReportIntervalSeconds = 60;
+constexpr int kCredentialRefreshMarginSeconds = 300;
+class SdContentManager {};
+struct Application {
+    static Application& GetInstance() { static Application instance; return instance; }
+    void NotifyCustomerMqttOnline() {}
+};
+#define private public
+#include "manager.inc"
+#undef private
+static int credential_requests = 0;
+LocationMqttClient::LocationMqttClient(RndisBoard& board, std::function<bool()> ready)
+    : board_(board), position_subscriber_(std::make_unique<PositionSubscriber>(board, std::move(ready))) {}
+LocationMqttClient::~LocationMqttClient() { Stop(); }
+bool LocationMqttClient::FetchCredentials(const std::string&, Credentials&) {
+    ++credential_requests; last_credentials_http_status_ = 403; return false;
+}
+bool LocationMqttClient::StartMqtt(const Credentials&, const std::string&, const std::string&) { assert(false); return false; }
+void LocationMqttClient::StopMqtt() {}
+void LocationMqttClient::QuerySignalStrength() {}
+bool LocationMqttClient::PublishOnlineReport() { return true; }
+void LocationMqttClient::PersistRuntimeCheckpoint() {}
+
+static void RunTicks(PositionSubscriber& subscriber) {
+    while (!subscriber.stopping_) { subscriber.Poll(); vTaskDelay(1000); }
+}
 
 static void Connected() {
     EventData event; event.client = &client;
@@ -161,10 +221,10 @@ int main() {
                 subscriber.stopping_ = true;
             }
         };
-        subscriber.Run(); on_delay = {};
+        RunTicks(subscriber); on_delay = {};
         assert(board.queries >= 3);
     }
-    std::cout << "PASS independent subscriber loop, regular signal refresh and 90-second stale telemetry expiry\n";
+    std::cout << "PASS shared-worker polling, regular signal refresh and 90-second stale telemetry expiry\n";
     {
         RndisBoard board; board.cellular = false;
         bool wifi_ready = false;
@@ -179,7 +239,7 @@ int main() {
                 Connected(); assert(topic == "topic/864479086534999/position"); subscriber.stopping_ = true;
             }
         };
-        subscriber.Run(); on_delay = {};
+        RunTicks(subscriber); on_delay = {};
         assert(board.queries == 0);
     }
     std::cout << "PASS WiFi readiness gate and changed physical IMEI restarts subscription\n";
@@ -196,7 +256,7 @@ int main() {
                 assert(starts == original_starts); subscriber.stopping_ = true;
             }
         };
-        subscriber.Run(); on_delay = {};
+        RunTicks(subscriber); on_delay = {};
     }
     std::cout << "PASS signal refresh without IMEI and five-second retry after AT failure\n";
     {
@@ -234,4 +294,49 @@ int main() {
         assert(BrokerAddressForLog("wss://[::1]:443/mqtt") == "wss://[::1]:443");
     }
     std::cout << "PASS init/register/task failures clean up, retry succeeds, domain/heap/CONNACK logs and credential redaction\n";
+    {
+        RndisBoard board;
+        PositionSubscriber subscriber(board, []() { return true; });
+        const int original_starts = starts;
+        start_result = -1;
+        subscriber.Poll(); assert(starts == original_starts + 1 && !subscriber.client_);
+        now_us += 4000000; subscriber.Poll(); assert(starts == original_starts + 1);
+        start_result = ESP_OK;
+        now_us += 1000000; subscriber.Poll();
+        assert(starts == original_starts + 2 && subscriber.client_);
+        board.ready = false; subscriber.Poll();
+        assert(!subscriber.client_ && board.display.signal == -1);
+    }
+    std::cout << "PASS task-start failure retains five-second retry and network loss cleans up the recovered client\n";
+    {
+        RndisBoard board;
+        // In the old layout, 12288+6144+4096 exceeded this 20000-byte stack budget.
+        // The real shared Start/Run/WaitOrStop paths must now fit without shrinking any stack.
+        internal_budget = 20000; internal_used = internal_peak = 0;
+        internal_used = 12288 + 6144; // Previous pair of management stacks.
+        assert(esp_mqtt_client_start(&client) != ESP_OK);
+        internal_used = 0;
+        const int original_tasks = management_tasks;
+        const int original_requests = credential_requests;
+        const int64_t begin = now_us;
+        {
+            LocationMqttClient manager(board, []() { return true; });
+            int ticks = 0;
+            on_delay = [&]() {
+                ++ticks;
+                if (ticks == 1) Connected();
+                if (now_us - begin >= 95LL * 1000000) manager.stop_requested_ = true;
+            };
+            manager.Start(); manager.Start(); // Idempotent: only one existing management task.
+            manager_task(); on_delay = {}; manager_task = {};
+            assert(management_tasks == original_tasks + 1);
+            assert(credential_requests - original_requests == 3); // 403 retry backoff 30s, 60s, 120s.
+            assert(board.queries >= 4); // CSQ continues inside long credential backoff waits.
+            assert(manager.position_subscriber_->client_ != nullptr);
+            assert(internal_peak == 12288 + 4096 && internal_peak < internal_budget);
+        }
+        assert(internal_used == 0); // MQTT and shared worker stacks both released.
+        internal_budget = -1;
+    }
+    std::cout << "PASS real shared manager Start/Run/WaitOrStop: one management task, 6KB stack saving, bounded stack-budget recovery, 403-independent positioning/CSQ and cleanup\n";
 }

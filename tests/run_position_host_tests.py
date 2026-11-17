@@ -18,6 +18,9 @@ def main():
         header = (ROOT / "main/boards/jiuchuan-s3/position_subscriber.h").read_text(encoding="utf-8")
         source = (ROOT / "main/boards/jiuchuan-s3/position_subscriber.cc").read_text(encoding="utf-8")
         cabinet = (ROOT / "main/boards/jiuchuan-s3/location_mqtt_client.cc").read_text(encoding="utf-8")
+        manager_header = (ROOT / "main/boards/jiuchuan-s3/location_mqtt_client.h").read_text(encoding="utf-8")
+        (temp / "manager.inc").write_text(manager_header[manager_header.index("class LocationMqttClient {"):manager_header.index("#endif")] + "\n" +
+            cabinet[cabinet.index("void LocationMqttClient::Start()"):cabinet.index("bool LocationMqttClient::FetchCredentials(")], encoding="utf-8")
         (temp / "broker_log.inc").write_text(cabinet[cabinet.index("std::string BrokerAddressForLog("):
                                                     cabinet.index("constexpr const char* kCredentialsUrl")], encoding="utf-8")
         (temp / "subscriber.inc").write_text(header[header.index("class PositionSubscriber {"):] + "\n" + source[source.index("namespace {"):], encoding="utf-8")

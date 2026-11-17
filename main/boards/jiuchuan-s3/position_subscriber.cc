@@ -16,23 +16,8 @@ PositionSubscriber::PositionSubscriber(RndisBoard& board, std::function<bool()> 
 
 PositionSubscriber::~PositionSubscriber() {
     stopping_ = true;
-    // Let the owner task stop/destroy MQTT and finish its AT query before
-    // releasing callback state. No forced task deletion while it owns I/O.
-    while (running_) vTaskDelay(pdMS_TO_TICKS(20));
-}
-
-void PositionSubscriber::Start() {
-    if (running_.exchange(true)) return;
-    stopping_ = false;
-    if (xTaskCreate([](void* argument) {
-            auto* self = static_cast<PositionSubscriber*>(argument);
-            self->Run();
-            self->running_ = false;
-            vTaskDelete(nullptr);
-        }, "position_mqtt", 6144, this, 2, nullptr) != pdPASS) {
-        running_ = false;
-        ESP_LOGE(kTag, "Cannot create position subscriber task");
-    }
+    // The owner first joins its existing worker, then stops MQTT callbacks.
+    StopClient();
 }
 
 void PositionSubscriber::ClearPosition() {
@@ -106,46 +91,41 @@ bool PositionSubscriber::UpdateSignal() {
     return csq >= 0;
 }
 
-void PositionSubscriber::Run() {
-    int64_t next_signal = 0, next_start = 0;
+void PositionSubscriber::Poll() {
+    if (stopping_) return;
     const bool configured = std::strlen(JIUCHUAN_POSITION_MQTT_PASSWORD) != 0;
-    if (!configured) ESP_LOGW(kTag, "Position credentials not configured; signal indicator remains available");
-    while (!stopping_) {
-        const int64_t now = esp_timer_get_time();
-        const bool ready = board_.IsCellularNetwork() ? board_.IsNetworkReady() : network_ready_();
-        // Signal strength does not depend on IMEI or MQTT authentication.
-        if (!ready) {
-            if (auto* display = board_.GetDisplay()) display->SetCellularSignal(-1);
-            next_signal = 0;
-        } else if (now >= next_signal) {
-            const bool valid = UpdateSignal();
-            next_signal = now + (valid ? 30LL : 5LL) * 1000 * 1000;
-        }
-        const std::string imei = board_.GetImei();
-        if (!ready || !ml307_at::IsImei(imei)) {
-            if (client_) StopClient();
-        } else {
-            if (client_ && imei != imei_) {
-                StopClient();
-                next_start = 0;
-            }
-            if (configured && !client_ && now >= next_start) {
-                StartClient(imei);
-                next_start = now + 5LL * 1000 * 1000;
-            }
-        }
-        // A connected broker can silently stop receiving modem telemetry.
-        {
-            std::lock_guard<std::mutex> lock(navigation_mutex_);
-            const int64_t last = received_at_;
-            if (last > 0 && now - last >= kPositionTimeoutUs) {
-                received_at_ = 0;
-                if (auto* display = board_.GetDisplay()) display->SetNavigationStatus(NavigationStatus{});
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    const int64_t now = esp_timer_get_time();
+    const bool ready = board_.IsCellularNetwork() ? board_.IsNetworkReady() : network_ready_();
+    // Signal strength does not depend on IMEI or MQTT authentication.
+    if (!ready) {
+        if (auto* display = board_.GetDisplay()) display->SetCellularSignal(-1);
+        next_signal_ = 0;
+    } else if (now >= next_signal_) {
+        const bool valid = UpdateSignal();
+        next_signal_ = now + (valid ? 30LL : 5LL) * 1000 * 1000;
     }
-    StopClient();
+    const std::string imei = board_.GetImei();
+    if (!ready || !ml307_at::IsImei(imei)) {
+        if (client_) StopClient();
+    } else {
+        if (client_ && imei != imei_) {
+            StopClient();
+            next_start_ = 0;
+        }
+        if (configured && !client_ && now >= next_start_) {
+            StartClient(imei);
+            next_start_ = now + 5LL * 1000 * 1000;
+        }
+    }
+    // A connected broker can silently stop receiving modem telemetry.
+    {
+        std::lock_guard<std::mutex> lock(navigation_mutex_);
+        const int64_t last = received_at_;
+        if (last > 0 && now - last >= kPositionTimeoutUs) {
+            received_at_ = 0;
+            if (auto* display = board_.GetDisplay()) display->SetNavigationStatus(NavigationStatus{});
+        }
+    }
 }
 
 void PositionSubscriber::Event(void* argument, esp_event_base_t, int32_t id, void* data) {
