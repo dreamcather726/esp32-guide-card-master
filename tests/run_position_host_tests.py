@@ -17,6 +17,9 @@ def main():
         subprocess.run(["gcc", "-g", "-fsanitize=address,undefined", "-c", str(cjson / "cJSON.c"), "-o", str(temp / "cjson.o")], check=True)
         header = (ROOT / "main/boards/jiuchuan-s3/position_subscriber.h").read_text(encoding="utf-8")
         source = (ROOT / "main/boards/jiuchuan-s3/position_subscriber.cc").read_text(encoding="utf-8")
+        cabinet = (ROOT / "main/boards/jiuchuan-s3/location_mqtt_client.cc").read_text(encoding="utf-8")
+        (temp / "broker_log.inc").write_text(cabinet[cabinet.index("std::string BrokerAddressForLog("):
+                                                    cabinet.index("constexpr const char* kCredentialsUrl")], encoding="utf-8")
         (temp / "subscriber.inc").write_text(header[header.index("class PositionSubscriber {"):] + "\n" + source[source.index("namespace {"):], encoding="utf-8")
         for name in ("position_data_test", "position_subscriber_test"):
             binary = temp / name

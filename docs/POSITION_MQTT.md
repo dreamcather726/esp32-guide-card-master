@@ -60,3 +60,13 @@ python3 tests/run_navigation_lvgl_test.py --lvgl /path/to/lvgl-9.3.0 --cjson /pa
 显示测试直接使用生产四角控件和真实 LVGL 9.3 软件渲染，检查坐标、信号格、数字电量、卫星图标可见性、定位编号、失效占位和二维码遮挡。实际板级文件、新订阅客户端和原业务 MQTT 文件已在 ESP-IDF 5.5.4 / GCC 14.2.0 环境完成 ESP32-S3 编译和链接。`2.1.22` 应用大小 3,292,976 字节，分区剩余约 20%；ESP32-S3 镜像校验和完整镜像逐段核对通过。
 
 实机仍需验证账号认证、持续接收定位、断网重连、卫星数变化、右下编号下发、AT 信号和屏幕显示效果。
+
+## 两路 MQTT 启动诊断
+
+现有 `CabinetMqtt`（凭证服务返回的 WSS 域名）和 `PositionMqtt`（`mqtt://iot.suji.work:1883`）均打印连接、登录、成功、订阅确认、断线及错误日志，每条关键日志携带 broker，方便按实际域名区分。连接参数包含 clientId、用户名、主题、keepalive、栈与缓冲区大小；密码隐藏，WSS URL 仅打印 scheme/host/port，不打印 URL 中的凭据、路径或查询令牌。
+
+`[TASK_STARTED]` 仅代表任务启动，`[CONNECTED] ... CONNACK=0` 才代表服务器登录成功。`[ERROR]` 打印 error type、CONNACK、TLS 和 socket errno，可区分认证拒绝和连接错误。
+
+`Error create mqtt task` 是 ESP MQTT 在 FreeRTOS 创建任务失败时打印的本地错误，尚未开始服务器登录。`2.1.23` 仍使用原任务创建方式，不能认定该版本已解决。当前修改保留两个客户端和原栈大小，不新增任务；启动及失败时补充 `internal_free`、`internal_largest` 和启动时 `psram_free`，并区分 `register_event`/`create_task` 失败。定位客户端初始化/任务失败后销毁句柄，现有循环继续重试。
+
+内部 RAM 不足或碎片化是该报错的可能原因；PSRAM 剩余多不代表能分配普通 FreeRTOS 内部栈。需要实机日志判断，不通过盲目缩减栈或全局改变内存配置来宣称已修复。主机已模拟初始化、事件注册及任务启动失败，验证资源清理、重试恢复、错误阶段与密码隐藏；这不等同于复现真实 ESP32 内存耗尽。

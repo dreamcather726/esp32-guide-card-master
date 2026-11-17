@@ -16,6 +16,7 @@
 #include <esp_crt_bundle.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 #include <esp_vfs_fat.h>
 #include <http.h>
 
@@ -32,6 +33,16 @@
 namespace {
 
 constexpr const char* kTag = "CabinetMqtt";
+// Log only scheme/host/port; omit URL credentials, paths and query tokens.
+std::string BrokerAddressForLog(const std::string& uri) {
+    const auto scheme = uri.find("://");
+    const auto start = scheme == std::string::npos ? 0 : scheme + 3;
+    auto authority = uri.substr(start, uri.find_first_of("/?#", start) - start);
+    const auto at = authority.rfind('@');
+    if (at != std::string::npos) authority.erase(0, at + 1);
+    for (char& ch : authority) if (static_cast<unsigned char>(ch) < 0x20) ch = '?';
+    return (scheme == std::string::npos ? "" : uri.substr(0, start)) + authority;
+}
 constexpr const char* kCredentialsUrl =
     "http://mqttak.suji.work:8443/api/credentials";
 constexpr const char* kSettingsNamespace = "cab_mqtt";
@@ -657,26 +668,40 @@ bool LocationMqttClient::StartMqtt(const Credentials& credentials,
     config.task.stack_size = 6144;
     config.buffer.size = 4096;
 
+    ESP_LOGI(kTag, "[CONNECT] broker=%s clientId=%s username=%s password=<hidden> keepalive=%d stack=%d buffer=%d internal_free=%u internal_largest=%u psram_free=%u",
+             BrokerAddressForLog(active_credentials_.wss_url).c_str(), active_credentials_.client_id.c_str(),
+             active_credentials_.username.c_str(), config.session.keepalive, config.task.stack_size, config.buffer.size,
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+
     mqtt_client_ = esp_mqtt_client_init(&config);
     if (!mqtt_client_) {
-        ESP_LOGE(kTag, "esp_mqtt_client_init failed");
+        ESP_LOGE(kTag, "[INIT_FAILED] broker=%s internal_free=%u internal_largest=%u",
+                 BrokerAddressForLog(active_credentials_.wss_url).c_str(),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
         return false;
     }
     esp_err_t result = esp_mqtt_client_register_event(
         mqtt_client_, MQTT_EVENT_ANY, MqttEventEntry, this);
+    const char* stage = result == ESP_OK ? "create_task" : "register_event";
     if (result == ESP_OK) {
         result = esp_mqtt_client_start(mqtt_client_);
     }
     if (result != ESP_OK) {
-        ESP_LOGE(kTag, "MQTT WSS start failed: %s", esp_err_to_name(result));
+        ESP_LOGE(kTag, "[START_FAILED] broker=%s stage=%s error=%s stack=%d internal_free=%u internal_largest=%u; broker login has not started",
+                 BrokerAddressForLog(active_credentials_.wss_url).c_str(), stage, esp_err_to_name(result), config.task.stack_size,
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
         esp_mqtt_client_destroy(mqtt_client_);
         mqtt_client_ = nullptr;
         return false;
     }
 
     connected_ = false;
-    ESP_LOGI(kTag, "connecting MQTT over WSS: %s",
-             active_credentials_.wss_url.c_str());
+    ESP_LOGI(kTag, "[TASK_STARTED] broker=%s; waiting for broker CONNACK",
+             BrokerAddressForLog(active_credentials_.wss_url).c_str());
     return true;
 }
 
@@ -739,9 +764,12 @@ void LocationMqttClient::SubscribeBusinessTopics(
 void LocationMqttClient::HandleMqttEvent(int32_t event_id,
                                          esp_mqtt_event_handle_t event) {
     switch (event_id) {
+        case MQTT_EVENT_BEFORE_CONNECT:
+            ESP_LOGI(kTag, "[LOGIN] broker=%s clientId=%s", BrokerAddressForLog(active_credentials_.wss_url).c_str(), cab_guid_.c_str());
+            break;
         case MQTT_EVENT_CONNECTED:
             connected_ = true;
-            ESP_LOGI(kTag, "MQTT WSS connected as %s", cab_guid_.c_str());
+            ESP_LOGI(kTag, "[CONNECTED] broker=%s clientId=%s CONNACK=0", BrokerAddressForLog(active_credentials_.wss_url).c_str(), cab_guid_.c_str());
             SubscribeBusinessTopics(event->client);
             report_requested_ = true;
             if (task_handle_ != nullptr) {
@@ -753,11 +781,19 @@ void LocationMqttClient::HandleMqttEvent(int32_t event_id,
             incoming_topic_.clear();
             incoming_payload_.clear();
             incoming_retained_ = false;
-            ESP_LOGW(kTag, "MQTT WSS disconnected; automatic reconnect is active");
+            ESP_LOGW(kTag, "[DISCONNECTED] broker=%s; automatic reconnect is active", BrokerAddressForLog(active_credentials_.wss_url).c_str());
+            break;
+        case MQTT_EVENT_SUBSCRIBED:
+            ESP_LOGI(kTag, "[SUBSCRIBED] broker=%s message_id=%d", BrokerAddressForLog(active_credentials_.wss_url).c_str(), event->msg_id);
             break;
         case MQTT_EVENT_ERROR:
             connected_ = false;
-            ESP_LOGE(kTag, "MQTT WSS transport error");
+            if (event->error_handle) {
+                const auto* error = event->error_handle;
+                ESP_LOGE(kTag, "[ERROR] broker=%s type=%d connack=%d tls_esp=0x%x tls_stack=%d socket_errno=%d",
+                         BrokerAddressForLog(active_credentials_.wss_url).c_str(), int(error->error_type), int(error->connect_return_code),
+                         int(error->esp_tls_last_esp_err), error->esp_tls_stack_err, error->esp_transport_sock_errno);
+            } else ESP_LOGE(kTag, "[ERROR] broker=%s (no error detail)", BrokerAddressForLog(active_credentials_.wss_url).c_str());
             break;
         case MQTT_EVENT_DATA:
             if (event->current_data_offset == 0) {

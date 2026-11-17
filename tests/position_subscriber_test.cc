@@ -5,11 +5,17 @@
 #include <cassert>
 #include <vector>
 #include <mutex>
+#include <cstdio>
 
 using esp_err_t = int;
 constexpr int ESP_OK = 0, pdPASS = 1;
 constexpr int MQTT_EVENT_ANY = -1, MQTT_EVENT_CONNECTED = 1, MQTT_EVENT_DISCONNECTED = 2,
-              MQTT_EVENT_DATA = 3, MQTT_EVENT_ERROR = 4;
+              MQTT_EVENT_DATA = 3, MQTT_EVENT_ERROR = 4, MQTT_EVENT_BEFORE_CONNECT = 5,
+              MQTT_EVENT_SUBSCRIBED = 6;
+struct ErrorData {
+    int error_type = 0, connect_return_code = 0, esp_tls_last_esp_err = 0,
+        esp_tls_stack_err = 0, esp_transport_sock_errno = 0;
+};
 using esp_event_base_t = const char*;
 struct Client {};
 using esp_mqtt_client_handle_t = Client*;
@@ -20,6 +26,8 @@ struct EventData {
     char* data = nullptr;
     int data_len = 0, current_data_offset = 0, total_data_len = 0;
     bool retain = false;
+    int msg_id = 42;
+    ErrorData* error_handle = nullptr;
 };
 using esp_mqtt_event_handle_t = EventData*;
 struct esp_mqtt_client_config_t {
@@ -33,6 +41,8 @@ struct esp_mqtt_client_config_t {
 };
 static std::string topic, client_id;
 static int starts = 0, stops = 0, destroys = 0, subscriptions = 0;
+static bool init_success = true;
+static int register_result = ESP_OK, start_result = ESP_OK;
 static void (*event_callback)(void*, const char*, int32_t, void*) = nullptr;
 static void* event_argument = nullptr;
 static Client client;
@@ -41,12 +51,12 @@ static Client* esp_mqtt_client_init(const esp_mqtt_client_config_t* config) {
     assert(std::string(config->credentials.username) == "unit-test");
     assert(std::string(config->credentials.authentication.password) == "fake-password");
     client_id = config->credentials.client_id;
-    return &client;
+    return init_success ? &client : nullptr;
 }
 static int esp_mqtt_client_register_event(Client*, int, decltype(event_callback) callback, void* argument) {
-    event_callback = callback; event_argument = argument; return ESP_OK;
+    event_callback = callback; event_argument = argument; return register_result;
 }
-static int esp_mqtt_client_start(Client*) { ++starts; return ESP_OK; }
+static int esp_mqtt_client_start(Client*) { ++starts; return start_result; }
 static int esp_mqtt_client_stop(Client*) { ++stops; return ESP_OK; }
 static int esp_mqtt_client_destroy(Client*) { ++destroys; return ESP_OK; }
 static int esp_mqtt_client_subscribe(Client*, const char* value, int qos) {
@@ -55,7 +65,16 @@ static int esp_mqtt_client_subscribe(Client*, const char* value, int qos) {
 static int64_t now_us = 1;
 static int64_t esp_timer_get_time() { return now_us; }
 static const char* esp_err_to_name(int) { return "error"; }
-template <typename... Args> static void Log(const char*, const char*, Args...) {}
+static std::string logs;
+template <typename... Args> static void Log(const char*, const char* format, Args... args) {
+    char buffer[2048];
+    if constexpr (sizeof...(args) == 0) std::snprintf(buffer, sizeof(buffer), "%s", format);
+    else std::snprintf(buffer, sizeof(buffer), format, args...);
+    logs += buffer; logs += '\n';
+}
+constexpr unsigned MALLOC_CAP_INTERNAL = 1, MALLOC_CAP_8BIT = 2, MALLOC_CAP_SPIRAM = 4;
+static size_t heap_caps_get_free_size(unsigned caps) { return caps == MALLOC_CAP_SPIRAM ? 2000000 : 3500; }
+static size_t heap_caps_get_largest_free_block(unsigned) { return 3000; }
 static std::function<void()> on_delay;
 static void vTaskDelay(int ms) { now_us += static_cast<int64_t>(ms) * 1000; if (on_delay) on_delay(); }
 static void vTaskDelete(void*) {}
@@ -94,6 +113,7 @@ struct RndisBoard {
 #define private public
 #include "subscriber.inc"
 #undef private
+#include "broker_log.inc"
 
 static void Connected() {
     EventData event; event.client = &client;
@@ -179,4 +199,39 @@ int main() {
         subscriber.Run(); on_delay = {};
     }
     std::cout << "PASS signal refresh without IMEI and five-second retry after AT failure\n";
+    {
+        RndisBoard board;
+        PositionSubscriber subscriber(board, []() { return true; });
+        const int old_starts = starts, old_destroys = destroys;
+        init_success = false;
+        assert(!subscriber.StartClient(board.imei) && !subscriber.client_);
+        assert(starts == old_starts && destroys == old_destroys);
+        init_success = true; register_result = -1;
+        assert(!subscriber.StartClient(board.imei) && !subscriber.client_);
+        assert(starts == old_starts && destroys == old_destroys + 1);
+        register_result = ESP_OK; start_result = -1;
+        assert(!subscriber.StartClient(board.imei) && !subscriber.client_);
+        assert(starts == old_starts + 1 && destroys == old_destroys + 2);
+        assert(logs.find("stage=register_event") != std::string::npos);
+        assert(logs.find("stage=create_task") != std::string::npos);
+        assert(logs.find("internal_largest=3000") != std::string::npos);
+        start_result = ESP_OK;
+        assert(subscriber.StartClient(board.imei));
+        EventData event; event.client = &client;
+        subscriber.HandleEvent(MQTT_EVENT_BEFORE_CONNECT, &event);
+        Connected(); subscriber.HandleEvent(MQTT_EVENT_SUBSCRIBED, &event);
+        ErrorData error; error.error_type = 2; error.connect_return_code = 4;
+        event.error_handle = &error; subscriber.HandleEvent(MQTT_EVENT_ERROR, &event);
+        event.error_handle = nullptr; subscriber.HandleEvent(MQTT_EVENT_ERROR, &event);
+        assert(logs.find("[LOGIN] broker=mqtt://example.test:1883") != std::string::npos);
+        assert(logs.find("[CONNECTED]") != std::string::npos && logs.find("[SUBSCRIBED]") != std::string::npos);
+        assert(logs.find("connack=4") != std::string::npos);
+        assert(logs.find("fake-password") == std::string::npos);
+        assert(logs.find("password=<hidden>") != std::string::npos);
+        subscriber.StopClient();
+        assert(BrokerAddressForLog("wss://username:secret@broker.example:443/path?token=secret#frag") == "wss://broker.example:443");
+        assert(BrokerAddressForLog("wss://broker.example:443") == "wss://broker.example:443");
+        assert(BrokerAddressForLog("wss://[::1]:443/mqtt") == "wss://[::1]:443");
+    }
+    std::cout << "PASS init/register/task failures clean up, retry succeeds, domain/heap/CONNACK logs and credential redaction\n";
 }
