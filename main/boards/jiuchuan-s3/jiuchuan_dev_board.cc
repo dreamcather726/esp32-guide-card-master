@@ -450,7 +450,7 @@ public:
         const int edge = std::min(width_ - 8, height_ - 36);
         auto* image_box = lv_obj_create(startup_overlay_);
         lv_obj_set_size(image_box, edge, edge);
-        lv_obj_align(image_box, LV_ALIGN_TOP_MID, 0, 0);
+        lv_obj_align(image_box, LV_ALIGN_TOP_MID, 0, 6);
         lv_obj_set_style_pad_all(image_box, 0, 0);
         lv_obj_set_style_border_width(image_box, 0, 0);
         lv_obj_set_style_bg_opa(image_box, LV_OPA_TRANSP, 0);
@@ -463,7 +463,7 @@ public:
         lv_label_set_text(startup_imei_label_, "");
         lv_obj_set_style_text_font(startup_imei_label_, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(startup_imei_label_, lv_color_black(), 0);
-        lv_obj_align(startup_imei_label_, LV_ALIGN_BOTTOM_MID, 0, -18);
+        lv_obj_align(startup_imei_label_, LV_ALIGN_BOTTOM_MID, 0, -4);
 
         // There is no deadline measured from power-on: a first boot may need
         // to download the image. Only actual image display starts this timer.
