@@ -27,6 +27,12 @@
 #include <http.h>
 #include <sdmmc_cmd.h>
 
+#if defined(CONFIG_BT_NIMBLE_ROLE_OBSERVER) && !defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
+#include <host/ble_hs.h>
+#include <host/util/util.h>
+#include <nimble/nimble_port.h>
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -47,6 +53,70 @@
 #define BOARD_TAG "JiuchuanDevBoard"
 
 namespace {
+#if defined(CONFIG_BT_NIMBLE_ROLE_OBSERVER) && !defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
+constexpr const char* kBeaconTag = "BleBeacon";
+
+int OnBleBeaconReport(ble_gap_event* event, void*) {
+    if (event->type != BLE_GAP_EVENT_DISC) return 0;
+    const auto& report = event->disc;
+    const auto* address = report.addr.val;
+    char mac[18];
+    std::snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                  static_cast<unsigned>(address[5]), static_cast<unsigned>(address[4]),
+                  static_cast<unsigned>(address[3]), static_cast<unsigned>(address[2]),
+                  static_cast<unsigned>(address[1]), static_cast<unsigned>(address[0]));
+    const char* type = report.addr.type == BLE_ADDR_RANDOM ? "random" : "public";
+    if (report.rssi == 127) {
+        ESP_LOGI(kBeaconTag, "MAC=%s type=%s RSSI=unknown", mac, type);
+    } else {
+        ESP_LOGI(kBeaconTag, "MAC=%s type=%s RSSI=%d dBm", mac, type, report.rssi);
+    }
+    return 0;
+}
+
+void OnBleBeaconSync() {
+    uint8_t own_address_type = 0;
+    int result = ble_hs_util_ensure_addr(0);
+    if (result == 0) result = ble_hs_id_infer_auto(0, &own_address_type);
+    if (result == 0) {
+        ble_gap_disc_params scan = {};
+        scan.passive = 1;
+        scan.filter_duplicates = 1;
+        scan.itvl = 160;
+        scan.window = 48;
+        result = ble_gap_disc(own_address_type, BLE_HS_FOREVER, &scan, OnBleBeaconReport, nullptr);
+    }
+    if (result == 0) {
+        ESP_LOGI(kBeaconTag, "Passive BLE scan started");
+    } else if (result != BLE_HS_EALREADY) {
+        ESP_LOGE(kBeaconTag, "BLE scan failed: %d", result);
+    }
+}
+
+void StartBleBeaconScan() {
+    static bool started = false;
+    if (started) return;
+    const esp_err_t result = nimble_port_init();
+    if (result != ESP_OK) {
+        ESP_LOGE(kBeaconTag, "BLE init failed: %s", esp_err_to_name(result));
+        return;
+    }
+    ble_hs_cfg.sync_cb = OnBleBeaconSync;
+    if (xTaskCreatePinnedToCore([](void*) {
+            nimble_port_run();
+            vTaskDelete(nullptr);
+        }, "nimble_host", CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE, nullptr, configMAX_PRIORITIES - 4,
+        nullptr, CONFIG_BT_NIMBLE_PINNED_TO_CORE) != pdPASS) {
+        ESP_LOGE(kBeaconTag, "BLE host task creation failed; internal_largest=%u",
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+        const auto cleanup = nimble_port_deinit();
+        if (cleanup != ESP_OK) ESP_LOGE(kBeaconTag, "BLE cleanup failed: %s", esp_err_to_name(cleanup));
+        return;
+    }
+    started = true;
+}
+#endif
+
 bool IsCellularNetworkConfigured() {
     Settings network_settings("network", true);
     if (network_settings.GetInt("type", 1) != 0) {
@@ -1751,10 +1821,13 @@ public:
         if (!sd_card_) {
             ResolveStartupAudio();
             FailStartupQr();
-            return;
+        } else {
+            StartTfQrInitialization();
+            StartTfAudioInitialization();
         }
-        StartTfQrInitialization();
-        StartTfAudioInitialization();
+#if defined(CONFIG_BT_NIMBLE_ROLE_OBSERVER) && !defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
+        StartBleBeaconScan();
+#endif
     }
 
     NetworkInterface* GetNetwork() override {
