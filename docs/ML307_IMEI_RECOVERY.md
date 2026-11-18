@@ -75,3 +75,23 @@ No production server settings or fleet OTA release records were changed for 2.1.
 
 Missing SafetyReminder.mp3 and credentials HTTP 403 are separate faults. This
 release does not create missing customer audio files or change API authorization.
+
+## USB enumeration at power-on (2.1.26)
+
+The 2.1.25 log shows `Root port reset failed` before BLE initialization and
+before the CDC client starts consuming device events. The 4G modem had not
+enumerated by the end of the capture, so neither IMEI nor DHCP was ready.
+
+On ESP-IDF 5.5.4, the CDC driver still reserves the USB host early but keeps
+its root port unpowered until the board and RNDIS callbacks are registered.
+The Jiuchuan S3 build allows 500 ms for USB connection debounce and 100 ms
+after bus reset. After 12 seconds without enumeration, the network worker
+logs `[USB_BOOT] ML307 has not enumerated` and displays the existing modem
+detection status while remaining subscribed to device events. It does not
+reset an already enumerated modem or bypass the IMEI check.
+
+For an on-board check, capture `[USB_BOOT] USB root port powered after client
+setup`, `ML307 connected`, `ML307 IMEI parsed`, `AT+CSQ` and `USB RNDIS
+GOT_IP` from a cold boot. Verify that a late attach continues through QR and
+MQTT startup. The host tests exercise a late attach after the timeout but
+cannot confirm electrical USB timing or modem power.

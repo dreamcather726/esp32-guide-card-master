@@ -9,6 +9,7 @@
 #include <sys/queue.h>
 #include "esp_err.h"
 #include "esp_check.h"
+#include "esp_idf_version.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
 #include "freertos/queue.h"
@@ -48,6 +49,7 @@ typedef struct {
     SemaphoreHandle_t open_close_mutex;
     TaskHandle_t client_task;
     bool event_handling_started;
+    bool root_port_power_pending;
     SLIST_HEAD(list_cb, dev_event_cb_s) dev_event_cb_list;
     SLIST_HEAD(list_dev_port, usbh_cdc_port_s) cdc_devices_port_list;   /*!< List of opened ports */
     SLIST_HEAD(list_dev, usbh_cdc_dev_s) cdc_devices_list;   /*!< List of opened devices */
@@ -94,6 +96,7 @@ typedef struct usbh_cdc_port_s {
 } usbh_cdc_port_t;
 
 static usbh_cdc_obj_t *p_usbh_cdc_obj = NULL;
+enum { USB_LIB_READY = 1, USB_LIB_ROOT_POWER_PENDING };
 
 static void _cdc_transfers_free(usbh_cdc_port_t *cdc_port);
 static esp_err_t _cdc_dev_ctrl_allocate(usbh_cdc_dev_t *cdc_dev);
@@ -163,8 +166,9 @@ static void _ringbuf_flush(RingbufHandle_t ringbuf_hdl)
     }
 }
 
-static void usb_lib_task(void *arg)
+static void usb_lib_run(TaskHandle_t caller, bool defer_root_port)
 {
+    bool root_port_power_pending = false;
     usb_host_lib_info_t info;
     esp_err_t res =  usb_host_lib_info(&info);
     if (res == ESP_OK) {
@@ -174,6 +178,9 @@ static void usb_lib_task(void *arg)
         const usb_host_config_t host_config = {
             .skip_phy_setup = false,
             .intr_flags = ESP_INTR_FLAG_LEVEL1,
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
+            .root_port_unpowered = defer_root_port,
+#endif
         };
         esp_err_t install_result = usb_host_install(&host_config);
         if (install_result != ESP_OK) {
@@ -183,12 +190,18 @@ static void usb_lib_task(void *arg)
             vTaskDelete(NULL);
             return;
         }
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
+        root_port_power_pending = defer_root_port;
+#else
+        (void)defer_root_port;
+#endif
     } else {
         assert(0); // Should never reach here
     }
 
     //Signalize the usbh_cdc_driver_install, the USB host library has been installed
-    xTaskNotifyGive(arg);
+    xTaskNotify(caller, root_port_power_pending ? USB_LIB_ROOT_POWER_PENDING : USB_LIB_READY,
+                eSetValueWithOverwrite);
 
     bool has_clients = true;
     bool has_devices = false;
@@ -217,6 +230,16 @@ static void usb_lib_task(void *arg)
     ESP_ERROR_CHECK(usb_host_uninstall());
     ESP_LOGD(TAG, "USB Host library is uninstalled");
     vTaskDelete(NULL);
+}
+
+static void usb_lib_task(void *arg)
+{
+    usb_lib_run(arg, false);
+}
+
+static void usb_lib_task_deferred(void *arg)
+{
+    usb_lib_run(arg, true);
 }
 
 /**
@@ -376,16 +399,19 @@ esp_err_t usbh_cdc_driver_install(const usbh_cdc_driver_config_t *config)
 
     ESP_LOGI(TAG, "iot usbh cdc version: %d.%d.%d", IOT_USBH_CDC_VER_MAJOR, IOT_USBH_CDC_VER_MINOR, IOT_USBH_CDC_VER_PATCH);
 
+    bool root_port_power_pending = false;
     if (!config->skip_init_usb_host_driver) {
         BaseType_t core_id = (CONFIG_USBH_TASK_CORE_ID < 0) ? tskNO_AFFINITY : CONFIG_USBH_TASK_CORE_ID;
-        BaseType_t task_created = xTaskCreatePinnedToCore(usb_lib_task, "usb_lib", 4096, xTaskGetCurrentTaskHandle(), CONFIG_USBH_TASK_BASE_PRIORITY, NULL, core_id);
+        TaskFunction_t entry = config->defer_event_handling ? usb_lib_task_deferred : usb_lib_task;
+        BaseType_t task_created = xTaskCreatePinnedToCore(entry, "usb_lib", 4096, xTaskGetCurrentTaskHandle(), CONFIG_USBH_TASK_BASE_PRIORITY, NULL, core_id);
         ESP_RETURN_ON_FALSE(task_created == pdPASS, ESP_FAIL, TAG, "xTaskCreatePinnedToCore failed");
         // Wait unit the USB host library is installed
-        uint32_t notify_value = ulTaskNotifyTake(false, pdMS_TO_TICKS(1000));
+        uint32_t notify_value = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
         if (notify_value == 0) {
             ESP_LOGE(TAG, "USB host library not installed");
             return ESP_FAIL;
         }
+        root_port_power_pending = notify_value == USB_LIB_ROOT_POWER_PENDING;
     }
 
     p_usbh_cdc_obj = (usbh_cdc_obj_t *) calloc(1, sizeof(usbh_cdc_obj_t));
@@ -423,6 +449,7 @@ esp_err_t usbh_cdc_driver_install(const usbh_cdc_driver_config_t *config)
 
     p_usbh_cdc_obj->client_task = driver_task_h;
     p_usbh_cdc_obj->event_handling_started = !config->defer_event_handling;
+    p_usbh_cdc_obj->root_port_power_pending = root_port_power_pending;
     if (p_usbh_cdc_obj->event_handling_started) {
         xTaskNotifyGive(driver_task_h);
     } else {
@@ -466,6 +493,19 @@ esp_err_t usbh_cdc_start_event_handling(void)
     p_usbh_cdc_obj->event_handling_started = true;
     CDC_EXIT_CRITICAL();
 
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 0)
+    if (p_usbh_cdc_obj->root_port_power_pending) {
+        esp_err_t ret = usb_host_lib_set_root_port_power(true);
+        if (ret != ESP_OK) {
+            CDC_ENTER_CRITICAL();
+            p_usbh_cdc_obj->event_handling_started = false;
+            CDC_EXIT_CRITICAL();
+            ESP_RETURN_ON_ERROR(ret, TAG, "USB root port power on failed");
+        }
+        p_usbh_cdc_obj->root_port_power_pending = false;
+        ESP_LOGI(TAG, "[USB_BOOT] USB root port powered after client setup");
+    }
+#endif
     xTaskNotifyGive(client_task);
     ESP_LOGI(TAG, "USB CDC event handling started");
     return ESP_OK;

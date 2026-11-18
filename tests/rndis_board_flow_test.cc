@@ -23,6 +23,7 @@ using EventBits_t = uint32_t;
 constexpr TickType_t portMAX_DELAY = UINT32_MAX;
 constexpr bool pdTRUE = true, pdFALSE = false;
 constexpr uint32_t kExistingRndisGracePeriodMs = 8000;
+constexpr uint32_t kUsbEnumerationTimeoutMs = 12000;
 constexpr uint32_t pdMS_TO_TICKS(uint32_t ms) { return ms; }
 struct WorkerIdle {};
 
@@ -33,6 +34,8 @@ struct Environment {
     bool cellular = true;
     std::string csq_reply = "\r\n+CSQ: 28,99\r\nOK\r\n";
     unsigned connecting = 0;
+    unsigned detecting = 0;
+    std::function<void()> on_missing_modem;
     std::map<std::string, std::string> nvs;
     std::vector<std::string> commands;
     std::vector<uint32_t> retry_delays;
@@ -60,7 +63,7 @@ struct Settings {
     std::string GetString(const std::string& key) { return env->nvs[key]; }
     void SetString(const std::string& key, const std::string& value) { env->nvs[key] = value; }
 };
-enum class NetworkEvent { Connecting };
+enum class NetworkEvent { Connecting, ModemDetecting };
 class RndisBoard {
 public:
     std::mutex usb_state_mutex_;
@@ -75,7 +78,14 @@ public:
     int GetCellularSignal() const { return cellular_csq_; }
     bool IsCellularNetwork() const { return env->cellular; }
     bool IsNetworkReady() const { return (env->bits & EVENT_GOT_IP_BIT) != 0; }
-    void OnNetworkEvent(NetworkEvent, const std::string&) { ++env->connecting; }
+    void OnNetworkEvent(NetworkEvent event, const std::string& = "") {
+        if (event == NetworkEvent::Connecting) {
+            ++env->connecting;
+        } else {
+            ++env->detecting;
+            if (env->on_missing_modem) env->on_missing_modem();
+        }
+    }
     bool EnsureUsbAtControlPort(uint32_t session) {
         ++env->probes;
         if (env->probe_failures) { --env->probe_failures; return false; }
@@ -229,8 +239,22 @@ int main() {
     });
     test("no attached USB device stays idle", [](auto& board) {
         board.usb_device_addr_ = 0;
+        env->bits = 0;
         Run(board);
         Check(env->commands.empty() && env->probes == 0, "probing absent device");
+        Check(env->detecting == 1 && env->retry_delays == std::vector<uint32_t>{12000},
+              "startup did not report a missing modem once");
+    });
+    test("late enumeration recovers after the timeout", [](auto& board) {
+        board.usb_device_addr_ = 0;
+        env->bits = 0;
+        env->on_missing_modem = [&]() {
+            board.usb_device_addr_ = 1;
+            env->bits = EVENT_USB_DEVICE_BIT | EVENT_GOT_IP_BIT;
+        };
+        Run(board);
+        Check(env->detecting == 1 && !board.GetImei().empty(), "late device did not recover");
+        Check(Calls("AT+MDIALUP=1,1") == 0, "late warm modem was redialed");
     });
     test("dial accepted but no IP is retried after 30 seconds", [](auto& board) {
         env->bits = EVENT_USB_DEVICE_BIT;

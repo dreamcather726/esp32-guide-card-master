@@ -31,6 +31,7 @@ static const char *TAG = "RndisBoard";
 
 static constexpr uint16_t kMl307UsbVendorId = 0x2ECC;
 static constexpr uint32_t kExistingRndisGracePeriodMs = 8000;
+static constexpr uint32_t kUsbEnumerationTimeoutMs = 12000;
 
 static bool ParseCregRegistration(const std::string& response, int& status) {
     const size_t marker = response.find("+CREG:");
@@ -667,27 +668,37 @@ void RndisBoard::NetworkTaskEntry(void *arg) {
 }
 
 void RndisBoard::NetworkTask() {
-    TickType_t wait = portMAX_DELAY;
+    TickType_t wait = pdMS_TO_TICKS(kUsbEnumerationTimeoutMs);
     unsigned failures = 0;
     while (true) {
         const EventBits_t bits = xEventGroupWaitBits(
             s_event_group, EVENT_USB_DEVICE_BIT | EVENT_USB_MAINTENANCE_BIT,
             pdTRUE, pdFALSE, wait);
         uint32_t session = 0;
+        bool modem_present = false;
         {
             std::lock_guard<std::mutex> lock(usb_state_mutex_);
-            if (!usb_device_addr_) {
-                failures = 0;
-                wait = portMAX_DELAY;
-                continue;
-            }
+            modem_present = usb_device_addr_ != 0;
             session = usb_session_;
-            if (!(bits & (EVENT_USB_DEVICE_BIT | EVENT_USB_MAINTENANCE_BIT)) &&
+            if (modem_present && !(bits & (EVENT_USB_DEVICE_BIT | EVENT_USB_MAINTENANCE_BIT)) &&
                 wait == pdMS_TO_TICKS(30000) && !IsNetworkReady()) {
                 // A dial command accepted without a subsequent IP event must
                 // not suppress all future recovery attempts.
                 usb_at_dial_succeeded_ = false;
             }
+        }
+        if (!modem_present) {
+            if (wait == pdMS_TO_TICKS(kUsbEnumerationTimeoutMs)) {
+                if (bits & (EVENT_USB_DEVICE_BIT | EVENT_USB_MAINTENANCE_BIT)) continue;
+                if (!IsNetworkReady()) {
+                    ESP_LOGW(TAG, "[USB_BOOT] ML307 has not enumerated after %lu ms; waiting for USB attach",
+                             static_cast<unsigned long>(kUsbEnumerationTimeoutMs));
+                    OnNetworkEvent(NetworkEvent::ModemDetecting);
+                }
+            }
+            failures = 0;
+            wait = portMAX_DELAY;
+            continue;
         }
         if (bits & EVENT_USB_DEVICE_BIT) {
             failures = 0;
