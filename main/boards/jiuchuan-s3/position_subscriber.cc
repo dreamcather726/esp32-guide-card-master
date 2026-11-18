@@ -79,31 +79,11 @@ void PositionSubscriber::StopClient() {
     ClearPosition();
 }
 
-bool PositionSubscriber::UpdateSignal() {
-    int csq = -1;
-    if (board_.IsCellularNetwork() && board_.IsNetworkReady()) {
-        std::string response;
-        if (board_.ExecuteUsbAtCommand("AT+CSQ", response, 3000)) csq = position::ParseCsq(response);
-    }
-    if (auto* display = board_.GetDisplay()) display->SetCellularSignal(csq);
-    if (csq < 0 && board_.IsCellularNetwork() && board_.IsNetworkReady())
-        ESP_LOGW(kTag, "CSQ unavailable; retrying in 5 seconds");
-    return csq >= 0;
-}
-
 void PositionSubscriber::Poll() {
     if (stopping_) return;
     const bool configured = std::strlen(JIUCHUAN_POSITION_MQTT_PASSWORD) != 0;
     const int64_t now = esp_timer_get_time();
     const bool ready = board_.IsCellularNetwork() ? board_.IsNetworkReady() : network_ready_();
-    // Signal strength does not depend on IMEI or MQTT authentication.
-    if (!ready) {
-        if (auto* display = board_.GetDisplay()) display->SetCellularSignal(-1);
-        next_signal_ = 0;
-    } else if (now >= next_signal_) {
-        const bool valid = UpdateSignal();
-        next_signal_ = now + (valid ? 30LL : 5LL) * 1000 * 1000;
-    }
     const std::string imei = board_.GetImei();
     if (!ready || !ml307_at::IsImei(imei)) {
         if (client_) StopClient();

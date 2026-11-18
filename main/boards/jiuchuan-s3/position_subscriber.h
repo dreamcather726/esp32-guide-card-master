@@ -19,7 +19,7 @@ private:
     RndisBoard& board_;
     std::function<bool()> network_ready_;
     std::atomic<bool> stopping_{false};
-    int64_t next_signal_ = 0, next_start_ = 0;
+    int64_t next_start_ = 0;
     int64_t received_at_ = 0;  // Protected by navigation_mutex_, including expiry.
     std::mutex navigation_mutex_;
     esp_mqtt_client_handle_t client_ = nullptr;
@@ -27,7 +27,6 @@ private:
     position::Message message_;
     bool StartClient(const std::string& imei);
     void StopClient();
-    bool UpdateSignal();
     void ClearPosition();
     static void Event(void*, esp_event_base_t, int32_t, void*);
     void HandleEvent(int32_t event_id, esp_mqtt_event_handle_t event);

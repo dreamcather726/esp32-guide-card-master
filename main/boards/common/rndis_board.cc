@@ -73,7 +73,8 @@ static const usb_device_match_id_t kMl307UsbMatchList[] = {
     {.match_flags = static_cast<usb_dev_match_flags_t>(0)},
 };
 
-RndisBoard::RndisBoard(bool initialize_usb) {
+RndisBoard::RndisBoard(bool initialize_usb, bool monitor_signal)
+    : monitor_signal_(monitor_signal) {
     if (initialize_usb) {
         // Install the USB host early so the native USB interrupt is reserved.
         // Event consumption is deferred until both the board AT callback and
@@ -197,6 +198,7 @@ void RndisBoard::HandleUsbDeviceConnected(const usbh_cdc_device_event_data_t& ev
     usb_interface_count_ = 0;
     usb_at_port_ = nullptr;
     imei_.clear();
+    cellular_csq_ = -1;
     usb_at_dial_succeeded_ = false;
 
     ESP_LOGI(TAG,
@@ -246,6 +248,7 @@ void RndisBoard::HandleUsbDeviceDisconnected(uint8_t device_addr) {
             usb_interface_count_ = 0;
             usb_at_port_ = nullptr;
             imei_.clear();
+            cellular_csq_ = -1;
             usb_at_dial_succeeded_ = false;
         }
     }
@@ -331,6 +334,7 @@ void RndisBoard::UsbAtClosedCallback(usbh_cdc_port_handle_t port_handle, void *u
         std::lock_guard<std::mutex> lock(board->usb_state_mutex_);
         if (board->usb_at_port_ == port_handle) {
             board->usb_at_port_ = nullptr;
+            board->cellular_csq_ = -1;
             matched = true;
         }
     }
@@ -581,12 +585,20 @@ bool RndisBoard::DetectAndDialUsbAt() {
         return false;
     }
 
+    if (monitor_signal_) {
+        std::string response;
+        const int csq = SendUsbAtCommand("AT+CSQ", response, 3000, session)
+            ? ml307_at::ParseCsq(response) : -1;
+        std::lock_guard<std::mutex> lock(usb_state_mutex_);
+        if (usb_session_ == session && usb_at_port_) cellular_csq_ = csq;
+    }
+
     // Identity/URCs are needed even when DHCP succeeded before the AT task ran.
     if (!identity_ready) {
         identity_ready = QueryAndCacheImei(session);
     }
     if (IsNetworkReady()) {
-        ESP_LOGI(TAG, "[USB_AT] RNDIS online; preserve data session, IMEI=%s; no dial-up",
+        ESP_LOGD(TAG, "[USB_AT] RNDIS online; preserve data session, IMEI=%s; no dial-up",
                  identity_ready ? "ready" : "pending");
         return identity_ready;
     }
@@ -696,7 +708,9 @@ void RndisBoard::NetworkTask() {
 
         if (DetectAndDialUsbAt()) {
             failures = 0;
-            wait = IsNetworkReady() ? portMAX_DELAY : pdMS_TO_TICKS(30000);
+            wait = !IsNetworkReady() ? pdMS_TO_TICKS(30000) :
+                !monitor_signal_ ? portMAX_DELAY :
+                pdMS_TO_TICKS(GetCellularSignal() >= 0 ? 10000 : 5000);
         } else {
             const uint32_t retry_ms = ml307_at::RetryDelayMs(failures);
             failures = std::min<unsigned>(failures + 1, 4);

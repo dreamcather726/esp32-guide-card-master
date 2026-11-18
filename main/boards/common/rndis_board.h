@@ -17,6 +17,7 @@
 #include <esp_timer.h>
 
 #include <array>
+#include <atomic>
 #include <functional>
 #include <mutex>
 
@@ -35,6 +36,8 @@ private:
     std::string usb_at_line_buffer_;
     std::function<void(const std::string&)> usb_at_line_callback_;
     std::string imei_;
+    const bool monitor_signal_;
+    std::atomic<int> cellular_csq_{-1};
     uint8_t usb_device_addr_ = 0;
     uint16_t usb_device_pid_ = 0;
     uint32_t usb_session_ = 0;
@@ -70,7 +73,7 @@ protected:
     void OnNetworkEvent(NetworkEvent event, const std::string& data = "");
 
 public:
-    explicit RndisBoard(bool initialize_usb = true);
+    explicit RndisBoard(bool initialize_usb = true, bool monitor_signal = false);
     virtual ~RndisBoard();
     
     virtual std::string GetBoardType() override;
@@ -91,6 +94,7 @@ public:
 
     /** Return the 15-digit IMEI read from the ML307 over USB AT. */
     std::string GetImei();
+    int GetCellularSignal() const { return cellular_csq_.load(); }
 
     /** Execute a serialized command on the detected ML307 USB AT interface. */
     bool ExecuteUsbAtCommand(const std::string& command,

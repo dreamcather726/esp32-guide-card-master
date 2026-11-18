@@ -86,16 +86,6 @@ inline int SignalBars(int csq) {
     return 1;
 }
 
-inline int ParseCsq(const std::string& response) {
-    const auto begin = response.find("+CSQ:");
-    if (begin == std::string::npos) return -1;
-    const char* value = response.c_str() + begin + 5;
-    char* end = nullptr;
-    const long csq = std::strtol(value, &end, 10);
-    if (end == value || (*end != ',' && *end != ' ' && *end != '\r' && *end != '\n')) return -1;
-    return csq >= 0 && csq <= 31 ? static_cast<int>(csq) : -1;
-}
-
 // MQTT payloads can span several DATA events. Reject gaps, foreign topics,
 // retained messages and oversized messages without buffering unbounded data.
 class Message {

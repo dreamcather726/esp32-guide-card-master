@@ -56,8 +56,5 @@ int main() {
         const int expected = csq < 1 || csq > 31 ? 0 : csq > 27 ? 4 : csq >= 16 ? 3 : csq >= 8 ? 2 : 1;
         assert(position::SignalBars(csq) == expected);
     }
-    assert(position::ParseCsq("\r\n+CSQ: 27,99\r\nOK\r\n") == 27);
-    assert(position::ParseCsq("+CSQ: 99,99") == -1);
-    assert(position::ParseCsq("+CSQ: 12junk") == -1);
     std::cout << "PASS ML307C sample, NMEA conversion, fix=1, satellite/scene validation, fragments, retained/foreign rejection and all CSQ boundaries\n";
 }

@@ -122,7 +122,7 @@ private:
     std::unique_ptr<GuidePages> guide_pages_;
     GuideView guide_view_;
     NavigationStatus navigation_status_;
-    std::atomic<int> cellular_csq_{-1};
+    const RndisBoard& rndis_board_;
     int subtitle_scroll_offset_ = 0;
     int subtitle_scroll_max_offset_ = 0;
     int subtitle_line_height_ = 25;
@@ -223,12 +223,13 @@ private:
     }
 
 public:
-    NoEmojiSpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
+    NoEmojiSpiLcdDisplay(const RndisBoard& rndis_board, esp_lcd_panel_io_handle_t panel_io,
                          esp_lcd_panel_handle_t panel,
                          int width, int height, int offset_x, int offset_y,
                          bool mirror_x, bool mirror_y, bool swap_xy)
         : SpiLcdDisplay(panel_io, panel, width, height, offset_x, offset_y,
-                        mirror_x, mirror_y, swap_xy) {
+                        mirror_x, mirror_y, swap_xy),
+          rndis_board_(rndis_board) {
         DisplayLockGuard lock(this);
 
         if (chat_message_label_ != nullptr) {
@@ -554,8 +555,6 @@ public:
         ApplyGuideView();
     }
 
-    void SetCellularSignal(int csq) override { cellular_csq_ = csq; }
-
     void UpdateStatusBar(bool update_all = false) override {
         // Preserve the existing low-battery warning and device status updates.
         SpiLcdDisplay::UpdateStatusBar(update_all);
@@ -564,7 +563,7 @@ public:
         if (!Board::GetInstance().GetBatteryLevel(level, charging, discharging)) level = -1;
         DisplayLockGuard lock(this);
         if (navigation_) {
-            navigation_->SetSignal(cellular_csq_.load());
+            navigation_->SetSignal(rndis_board_.GetCellularSignal());
             navigation_->SetBattery(level);
         }
         if (guide_pages_ && low_battery_popup_ &&
@@ -761,7 +760,7 @@ private:
         }
 
         display_ = new NoEmojiSpiLcdDisplay(
-            panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT,
+            *this, panel_io_, panel_, DISPLAY_WIDTH, DISPLAY_HEIGHT,
             DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y,
             DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
 
@@ -1512,7 +1511,7 @@ private:
 
 public:
     JiuchuanDevBoard()
-        : RndisBoard(PrepareBoardForStartup()),
+        : RndisBoard(PrepareBoardForStartup(), true),
           boot_button_(BOOT_BUTTON_GPIO),
           volume_up_button_(WIFI_BUTTON_GPIO),
           volume_down_button_(CMD_BUTTON_GPIO),

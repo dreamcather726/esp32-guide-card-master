@@ -44,7 +44,6 @@ public:
     virtual void SetContentFooter(const char* footer);
     virtual void SetGpsFixStatus(bool has_fix);
     virtual void SetNavigationStatus(const NavigationStatus&) {}
-    virtual void SetCellularSignal(int) {}
     virtual void SetGuideView(const GuideView&) {}
     virtual void SetTheme(Theme* theme);
     virtual Theme* GetTheme() { return current_theme_; }

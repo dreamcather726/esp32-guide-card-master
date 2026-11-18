@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -63,6 +64,26 @@ inline std::string_view Trim(std::string_view text) {
     const auto begin = text.find_first_not_of(" \t\r\n");
     return begin == std::string_view::npos ? std::string_view{} :
         text.substr(begin, text.find_last_not_of(" \t\r\n") - begin + 1);
+}
+
+inline int ParseCsq(std::string_view response) {
+    while (!response.empty()) {
+        const auto end = response.find_first_of("\r\n");
+        const auto line = Trim(response.substr(0, end));
+        if (line.substr(0, 5) == "+CSQ:") {
+            const auto comma = line.find(',');
+            if (comma == std::string_view::npos) return -1;
+            const auto field = Trim(line.substr(5, comma - 5));
+            if (field.empty()) return -1;
+            int csq = -1;
+            const auto finish = field.data() + field.size();
+            const auto parsed = std::from_chars(field.data(), finish, csq);
+            return parsed.ec == std::errc{} && parsed.ptr == finish && csq >= 0 && csq <= 31 ? csq : -1;
+        }
+        if (end == std::string_view::npos) break;
+        response.remove_prefix(end + 1);
+    }
+    return -1;
 }
 
 inline bool IsImei(std::string_view text) {

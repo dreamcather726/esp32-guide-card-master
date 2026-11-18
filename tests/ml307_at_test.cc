@@ -39,6 +39,12 @@ int main() {
     assert(ExtractImei("8644790864863221\r\nOK\r\n").empty());
     assert(ExtractImei("000000000000000\r\nOK\r\n").empty());
 
+    assert(ParseCsq("AT+CSQ\r\n+CSQ: 27,99\r\nOK\r\n") == 27);
+    assert(ParseCsq("+CSQ: 0,99") == 0);
+    assert(ParseCsq("+CSQ: 99,99") == -1);
+    assert(ParseCsq("+CSQ: 12junk,99") == -1);
+    assert(ParseCsq("+URC: +CSQ: 28,99") == -1);
+
     assert(ParseReply("\r\nOK\r\n") == Reply::Ok);
     assert(ParseReply("AT\r\nO") == Reply::Pending);
     assert(ParseReply("AT\r\nOK") == Reply::Pending);
@@ -53,5 +59,5 @@ int main() {
     assert(RetryDelayMs(3) == 16000);
     assert(RetryDelayMs(4) == 30000);
     assert(RetryDelayMs(100000) == 30000);
-    std::cout << "ML307 AT helper: 35 checks passed\n";
+    std::cout << "ML307 AT helper: 40 checks passed\n";
 }

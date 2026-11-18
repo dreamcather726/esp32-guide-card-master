@@ -10,6 +10,7 @@
 #include <vector>
 
 #define ESP_LOGI(...) ((void)0)
+#define ESP_LOGD(...) ((void)0)
 #define ESP_LOGW(...) ((void)0)
 #define ESP_LOGE(...) ((void)0)
 #define EVENT_GOT_IP_BIT 1
@@ -30,6 +31,7 @@ struct Environment {
     int waits = 0;
     unsigned probes = 0, probe_failures = 0, imei_failures = 0;
     bool cellular = true;
+    std::string csq_reply = "\r\n+CSQ: 28,99\r\nOK\r\n";
     unsigned connecting = 0;
     std::map<std::string, std::string> nvs;
     std::vector<std::string> commands;
@@ -68,6 +70,9 @@ public:
     void* usb_at_port_ = nullptr;
     void* s_event_group = nullptr;
     std::string imei_;
+    bool monitor_signal_ = false;
+    int cellular_csq_ = -1;
+    int GetCellularSignal() const { return cellular_csq_; }
     bool IsCellularNetwork() const { return env->cellular; }
     bool IsNetworkReady() const { return (env->bits & EVENT_GOT_IP_BIT) != 0; }
     void OnNetworkEvent(NetworkEvent, const std::string&) { ++env->connecting; }
@@ -83,7 +88,10 @@ public:
         response.clear();
         if (session != usb_session_ || !usb_at_port_) return false;
         if (env->on_command) env->on_command(cmd);
-        if (cmd == "AT+CGSN=1" || cmd == "AT+CGSN" || cmd == "AT+GSN") {
+        if (cmd == "AT+CSQ") {
+            response = env->csq_reply;
+            return !response.empty();
+        } else if (cmd == "AT+CGSN=1" || cmd == "AT+CGSN" || cmd == "AT+GSN") {
             if (env->imei_failures) { --env->imei_failures; return false; }
             response = "\r\n864479086486322\r\nOK\r\n";
         } else {
@@ -153,6 +161,42 @@ int main() {
         };
         Run(board);
         Check(Calls("AT+MDIALUP=1,1") == 1 && !board.GetImei().empty(), "cold start failed");
+    });
+    test("signal is sampled before IMEI, DHCP and MQTT", [](auto& board) {
+        board.monitor_signal_ = true;
+        env->bits = EVENT_USB_DEVICE_BIT;
+        env->imei_failures = 3;
+        env->on_command = [&](const std::string& command) {
+            if (command == "AT+CGSN=1" && Calls(command) == 1) {
+                Check(!board.IsNetworkReady() && board.GetImei().empty(), "test skipped early startup");
+                Check(board.GetCellularSignal() == 28, "early CSQ not yet available");
+                throw WorkerIdle{};
+            }
+        };
+        Run(board);
+        Check(Calls("AT+CSQ") == 1, "startup never sampled CSQ");
+    });
+    test("online CSQ follows signal changes and retries failures", [](auto& board) {
+        board.monitor_signal_ = true;
+        env->on_wait = [&](auto, auto wait) {
+            const auto sample = Calls("AT+CSQ");
+            if (sample == 1) {
+                Check(board.GetCellularSignal() == 28 && wait == 10000, "strong signal not sampled");
+                env->csq_reply = "+CSQ: 6,99\r\nOK\r\n";
+            } else if (sample == 2) {
+                Check(board.GetCellularSignal() == 6 && wait == 10000, "weak signal not updated");
+                env->csq_reply.clear();
+            } else if (sample == 3) {
+                Check(board.GetCellularSignal() == -1 && wait == 5000, "failed read did not clear and retry");
+                env->csq_reply = "+CSQ: 18,99\r\nOK\r\n";
+            } else {
+                Check(sample == 4 && board.GetCellularSignal() == 18, "signal did not recover");
+                throw WorkerIdle{};
+            }
+        };
+        Run(board);
+        Check(Calls("AT+CGSN=1") == 1 && Calls("AT+MDIALUP=1,1") == 0,
+              "signal polling interfered with the online connection");
     });
     test("cached dial flag does not skip missing identity", [](auto& board) {
         board.usb_at_dial_succeeded_ = true;

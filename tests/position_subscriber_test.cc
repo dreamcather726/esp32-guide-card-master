@@ -113,9 +113,8 @@ static int ulTaskNotifyTake(int, int ticks) { vTaskDelay(ticks); return 0; }
 static void xTaskNotifyGive(TaskHandle_t) {}
 struct Display {
     NavigationStatus navigation;
-    int signal = -1, updates = 0;
+    int updates = 0;
     void SetNavigationStatus(const NavigationStatus& status) { navigation = status; ++updates; }
-    void SetCellularSignal(int csq) { signal = csq; }
 };
 namespace ml307_at {
 static bool IsImei(const std::string& value) { return value.size() == 15; }
@@ -124,15 +123,10 @@ struct RndisBoard {
     Display display;
     bool cellular = true, ready = true;
     std::string imei = "864479086534998";
-    int queries = 0;
-    bool at_success = true;
     Display* GetDisplay() { return &display; }
     bool IsCellularNetwork() const { return cellular; }
     bool IsNetworkReady() const { return ready; }
     std::string GetImei() const { return imei; }
-    bool ExecuteUsbAtCommand(const std::string& command, std::string& response, int timeout) {
-        assert(command == "AT+CSQ" && timeout == 3000); ++queries; response = "+CSQ: 28,99\r\n"; return at_success;
-    }
 };
 #define ESP_LOGI Log
 #define ESP_LOGW Log
@@ -202,10 +196,9 @@ int main() {
         assert(!board.display.navigation.has_fix && board.display.navigation.satellites == -1);
         Connected(); assert(subscriptions == 2);
         Payload(payload); assert(board.display.navigation.satellites == 15);
-        subscriber.UpdateSignal(); assert(board.display.signal == 28);
         subscriber.StopClient(); assert(stops == 1 && destroys == 1);
     }
-    std::cout << "PASS native MQTT config, own IMEI topic, retained rejection, disconnect clear, reconnect subscribe and AT CSQ\n";
+    std::cout << "PASS native MQTT config, own IMEI topic, retained rejection, disconnect clear and reconnect subscribe\n";
     {
         RndisBoard board;
         PositionSubscriber subscriber(board, []() { return true; });
@@ -222,9 +215,8 @@ int main() {
             }
         };
         RunTicks(subscriber); on_delay = {};
-        assert(board.queries >= 3);
     }
-    std::cout << "PASS shared-worker polling, regular signal refresh and 90-second stale telemetry expiry\n";
+    std::cout << "PASS shared-worker polling and 90-second stale telemetry expiry\n";
     {
         RndisBoard board; board.cellular = false;
         bool wifi_ready = false;
@@ -240,25 +232,8 @@ int main() {
             }
         };
         RunTicks(subscriber); on_delay = {};
-        assert(board.queries == 0);
     }
     std::cout << "PASS WiFi readiness gate and changed physical IMEI restarts subscription\n";
-    {
-        RndisBoard board; board.imei.clear(); board.at_success = false;
-        PositionSubscriber subscriber(board, []() { return true; });
-        const int original_starts = starts;
-        int ticks = 0;
-        on_delay = [&]() {
-            ++ticks;
-            if (ticks == 1) { assert(board.queries == 1); assert(board.display.signal == -1); board.at_success = true; }
-            if (ticks == 7) {
-                assert(board.queries == 2 && board.display.signal == 28);
-                assert(starts == original_starts); subscriber.stopping_ = true;
-            }
-        };
-        RunTicks(subscriber); on_delay = {};
-    }
-    std::cout << "PASS signal refresh without IMEI and five-second retry after AT failure\n";
     {
         RndisBoard board;
         PositionSubscriber subscriber(board, []() { return true; });
@@ -305,7 +280,7 @@ int main() {
         now_us += 1000000; subscriber.Poll();
         assert(starts == original_starts + 2 && subscriber.client_);
         board.ready = false; subscriber.Poll();
-        assert(!subscriber.client_ && board.display.signal == -1);
+        assert(!subscriber.client_);
     }
     std::cout << "PASS task-start failure retains five-second retry and network loss cleans up the recovered client\n";
     {
@@ -331,12 +306,11 @@ int main() {
             manager_task(); on_delay = {}; manager_task = {};
             assert(management_tasks == original_tasks + 1);
             assert(credential_requests - original_requests == 3); // 403 retry backoff 30s, 60s, 120s.
-            assert(board.queries >= 4); // CSQ continues inside long credential backoff waits.
             assert(manager.position_subscriber_->client_ != nullptr);
             assert(internal_peak == 12288 + 4096 && internal_peak < internal_budget);
         }
         assert(internal_used == 0); // MQTT and shared worker stacks both released.
         internal_budget = -1;
     }
-    std::cout << "PASS real shared manager Start/Run/WaitOrStop: one management task, 6KB stack saving, bounded stack-budget recovery, 403-independent positioning/CSQ and cleanup\n";
+    std::cout << "PASS real shared manager Start/Run/WaitOrStop: one management task, 6KB stack saving, bounded stack-budget recovery, 403-independent positioning and cleanup\n";
 }
