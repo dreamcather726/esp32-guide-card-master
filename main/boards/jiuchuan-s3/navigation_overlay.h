@@ -45,26 +45,13 @@ public:
         lv_obj_center(battery_label_);
 
         auto* satellite_panel = Panel(0, height - 20, 60, 20);
-        satellite_image_ = lv_obj_create(satellite_panel);
+        satellite_image_ = lv_image_create(satellite_panel);
         lv_obj_remove_style_all(satellite_image_);
-        lv_obj_set_size(satellite_image_, 16, 20);
+        lv_image_set_src(satellite_image_, SatelliteIcon());
         lv_obj_set_pos(satellite_image_, 2, 0);
-        // Draw a satellite with two solar panels and a dish, distinct from
-        // the location pin on the other side. No font-dependent glyphs.
-        for (int i = 0; i < 3; ++i) {
-            auto* block = lv_obj_create(satellite_image_);
-            lv_obj_remove_style_all(block);
-            lv_obj_set_size(block, 4, i == 1 ? 11 : 8);
-            lv_obj_set_pos(block, i * 6, i == 1 ? 3 : 5);
-            lv_obj_set_style_bg_color(block, lv_color_black(), 0);
-            lv_obj_set_style_bg_opa(block, LV_OPA_COVER, 0);
-        }
-        auto* dish = lv_line_create(satellite_image_);
-        lv_line_set_points(dish, dish_points_.data(), dish_points_.size());
-        lv_obj_set_style_line_width(dish, 2, 0);
-        lv_obj_set_style_line_color(dish, lv_color_black(), 0);
+        lv_obj_set_style_image_recolor(satellite_image_, lv_color_black(), 0);
         satellite_label_ = Label(satellite_panel, "--");
-        lv_obj_set_pos(satellite_label_, 19, 2);
+        lv_obj_set_pos(satellite_label_, 26, 2);
 
         auto* scene_panel = Panel(width - 84, height - 20, 84, 20);
         auto* ring = lv_obj_create(scene_panel);
@@ -135,13 +122,58 @@ private:
     lv_obj_t* layer_ = nullptr;
     std::array<lv_obj_t*, 4> bars_{};
     std::array<lv_point_precise_t, 3> pin_points_{{{1, 0}, {5, 8}, {9, 0}}};
-    std::array<lv_point_precise_t, 5> dish_points_{{{3, 15}, {5, 18}, {8, 19}, {11, 18}, {13, 15}}};
     lv_obj_t* battery_label_ = nullptr;
     lv_obj_t* satellite_image_ = nullptr;
     lv_obj_t* satellite_label_ = nullptr;
     lv_obj_t* scene_label_ = nullptr;
     lv_timer_t* blink_timer_ = nullptr;
     bool has_fix_ = false, blink_visible_ = true;
+
+    static const lv_image_dsc_t* SatelliteIcon() {
+        static constexpr int width = 21, height = 19;
+        static constexpr char silhouette[height][width + 1] = {
+            "..........#..........",
+            ".........###.........",
+            "........#####........",
+            ".#####...###...#####.",
+            "#######.#####.#######",
+            "#######.#####.#######",
+            "#####################",
+            "#######.#####.#######",
+            "#######.#####.#######",
+            ".#####...###...#####.",
+            "........#####........",
+            "..........#..........",
+            "..........#..........",
+            "........#####........",
+            ".......##...##.......",
+            ".......##...##.......",
+            "........#####........",
+            ".........###.........",
+            "..........#..........",
+        };
+        alignas(LV_DRAW_BUF_ALIGN) static constexpr auto pixels = [] {
+            std::array<uint8_t, width * height> alpha{};
+            for (int y = 0; y < height; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    alpha[y * width + x] = silhouette[y][x] == '#' ? LV_OPA_COVER : LV_OPA_TRANSP;
+                }
+            }
+            return alpha;
+        }();
+        static const lv_image_dsc_t image = [] {
+            lv_image_dsc_t descriptor{};
+            descriptor.header.magic = LV_IMAGE_HEADER_MAGIC;
+            descriptor.header.cf = LV_COLOR_FORMAT_A8;
+            descriptor.header.w = width;
+            descriptor.header.h = height;
+            descriptor.header.stride = width;
+            descriptor.data_size = pixels.size();
+            descriptor.data = pixels.data();
+            return descriptor;
+        }();
+        return &image;
+    }
 
     lv_obj_t* Panel(int x, int y, int width, int height) {
         auto* object = lv_obj_create(layer_);
