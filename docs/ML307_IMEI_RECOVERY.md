@@ -95,3 +95,24 @@ setup`, `ML307 connected`, `ML307 IMEI parsed`, `AT+CSQ` and `USB RNDIS
 GOT_IP` from a cold boot. Verify that a late attach continues through QR and
 MQTT startup. The host tests exercise a late attach after the timeout but
 cannot confirm electrical USB timing or modem power.
+
+## AT endpoint allocation with RNDIS already online (2.1.27)
+
+In ESP-IDF 5.5.4, `EP Alloc error: ESP_ERR_NO_MEM` can come from
+allocating endpoint objects or the USB DMA descriptor lists. Exhausted USB
+hardware channels report `No more HCD channels available` and return
+`ESP_ERR_NOT_SUPPORTED`. The log alone does not identify the exact allocation
+that failed.
+
+In 4G mode, let the existing USB worker open and probe the AT port before
+starting BLE. The AT port reads the receive transfer in its callback, so it
+no longer allocates software rings or submits a notification transfer.
+RNDIS retains its data and notification handling. Partial CDC allocations are
+released once, and a failed AT probe does not close the already-open RNDIS
+device. Open failures log `dma_free`, `dma_largest` and `internal_free`.
+Wi-Fi mode still starts BLE at boot.
+
+On the board, check for `ML307 AT control interface detected`, followed by a
+valid IMEI and `AT+CSQ`. Then confirm that `BleBeacon` reports, RNDIS and both
+MQTT sessions coexist. The BLE start depends on the AT port in 4G mode, so
+missing or nonresponsive modules leave BLE unstarted until an AT probe succeeds.

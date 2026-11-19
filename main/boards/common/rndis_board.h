@@ -66,6 +66,7 @@ private:
     bool QueryAndCacheImei(uint32_t session);
 protected:
     NetworkEventCallback network_event_callback_ = nullptr;
+    virtual void OnUsbAtReady() {}
 
     virtual std::string GetBoardJson() override;
 

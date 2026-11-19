@@ -9,6 +9,7 @@
 #include <freertos/task.h>
 #include <esp_network.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <utility>
 #include <font_awesome.h>
 #include <usb/usb_helpers.h>
@@ -479,9 +480,9 @@ bool RndisBoard::OpenAndProbeUsbAtInterface(uint8_t device_addr, uint8_t interfa
     usbh_cdc_port_config_t port_config = {
         .dev_addr = device_addr,
         .itf_num = interface_number,
-        .in_ringbuf_size = 4096,
-        .out_ringbuf_size = 1024,
-        .in_transfer_buffer_size = 512,
+        .in_ringbuf_size = 0,
+        .out_ringbuf_size = 0,
+        .in_transfer_buffer_size = 256,
         .out_transfer_buffer_size = 512,
         .cbs = {
             .closed = UsbAtClosedCallback,
@@ -489,14 +490,18 @@ bool RndisBoard::OpenAndProbeUsbAtInterface(uint8_t device_addr, uint8_t interfa
             .notif_cb = nullptr,
             .user_data = this,
         },
-        .flags = static_cast<usbh_cdc_port_flags_t>(0),
+        .flags = USBH_CDC_FLAGS_DISABLE_NOTIFICATION,
     };
 
     usbh_cdc_port_handle_t candidate_port = nullptr;
     esp_err_t open_result = usbh_cdc_port_open(&port_config, &candidate_port);
     if (open_result != ESP_OK || !candidate_port) {
-        ESP_LOGW(TAG, "[USB_AT] interface %u cannot be opened: %s",
-                 interface_number, esp_err_to_name(open_result));
+        constexpr uint32_t dma_caps = MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL;
+        ESP_LOGW(TAG, "[USB_AT] interface %u cannot be opened: %s; dma_free=%u dma_largest=%u internal_free=%u",
+                 interface_number, esp_err_to_name(open_result),
+                 static_cast<unsigned>(heap_caps_get_free_size(dma_caps)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(dma_caps)),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
         return false;
     }
 
@@ -565,6 +570,7 @@ bool RndisBoard::EnsureUsbAtControlPort(uint32_t session) {
         if (OpenAndProbeUsbAtInterface(device_addr, candidate, session)) {
             std::string response;
             SendUsbAtCommand("ATE0", response, 2000, session);
+            OnUsbAtReady();
             return true;
         }
     }

@@ -1812,6 +1812,12 @@ public:
         }
     }
 
+    void OnUsbAtReady() override {
+#if defined(CONFIG_BT_NIMBLE_ROLE_OBSERVER) && !defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
+        Application::GetInstance().Schedule(StartBleBeaconScan);
+#endif
+    }
+
     void StartNetwork() override {
         // The base constructor already reserves the USB host interrupt.
         // Mount TF and try local resources before starting USB/WiFi transport.
@@ -1826,7 +1832,7 @@ public:
             StartTfAudioInitialization();
         }
 #if defined(CONFIG_BT_NIMBLE_ROLE_OBSERVER) && !defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
-        StartBleBeaconScan();
+        if (!cellular_network_) StartBleBeaconScan();
 #endif
     }
 

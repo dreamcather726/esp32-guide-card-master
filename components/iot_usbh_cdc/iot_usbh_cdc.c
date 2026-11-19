@@ -740,7 +740,9 @@ static esp_err_t _cdc_tx_xfer_submit(usb_transfer_t *out_xfer)
 static esp_err_t _cdc_dev_ctrl_free(usbh_cdc_dev_t *cdc_dev)
 {
     if (cdc_dev->ctrl.xfer) {
-        xSemaphoreTake(cdc_dev->ctrl.mux, portMAX_DELAY);
+        if (cdc_dev->ctrl.mux) {
+            xSemaphoreTake(cdc_dev->ctrl.mux, portMAX_DELAY);
+        }
 
         if (cdc_dev->ctrl.xfer->context) {
             vSemaphoreDelete(cdc_dev->ctrl.xfer->context);
@@ -768,7 +770,6 @@ static esp_err_t _cdc_dev_ctrl_allocate(usbh_cdc_dev_t *cdc_dev)
     ESP_GOTO_ON_FALSE(cdc_dev->ctrl.mux, ESP_ERR_NO_MEM, err, TAG,);
     return ret;
 err:
-    _cdc_dev_ctrl_free(cdc_dev);
     return ret;
 }
 
@@ -817,7 +818,6 @@ static esp_err_t _cdc_transfers_allocate(usbh_cdc_port_t *cdc_port, const usb_ep
     }
     return ret;
 err:
-    _cdc_transfers_free(cdc_port);
     return ret;
 }
 
@@ -867,18 +867,20 @@ esp_err_t usbh_cdc_port_open(const usbh_cdc_port_config_t *port_config, usbh_cdc
     // If the device handle is not set, try to open the device
     usbh_cdc_dev_t *_cdc_dev = get_cdc_dev_by_addr(port_config->dev_addr);
     usbh_cdc_dev_t *new_cdc_dev = NULL;
+    usb_device_handle_t newly_opened_device = NULL;
+    bool new_dev_linked = false;
     if (NULL == _cdc_dev) {
-        usb_device_handle_t current_device = NULL;
-        ESP_GOTO_ON_ERROR(usb_host_device_open(p_usbh_cdc_obj->cdc_client_hdl, port_config->dev_addr, &current_device), err, TAG, "Could not open device %d", port_config->dev_addr);
+        ESP_GOTO_ON_ERROR(usb_host_device_open(p_usbh_cdc_obj->cdc_client_hdl, port_config->dev_addr, &newly_opened_device), err, TAG, "Could not open device %d", port_config->dev_addr);
 
         new_cdc_dev = (usbh_cdc_dev_t *)calloc(1, sizeof(usbh_cdc_dev_t));
         ESP_GOTO_ON_FALSE(new_cdc_dev != NULL, ESP_ERR_NO_MEM, err, TAG, "calloc failed for cdc device");
         new_cdc_dev->dev_addr = port_config->dev_addr;
-        new_cdc_dev->dev_hdl = current_device;
+        new_cdc_dev->dev_hdl = newly_opened_device;
         ESP_GOTO_ON_ERROR(_cdc_dev_ctrl_allocate(new_cdc_dev), err, TAG, "Failed to allocate ctrl");
         CDC_ENTER_CRITICAL();
         SLIST_INSERT_HEAD(&p_usbh_cdc_obj->cdc_devices_list, new_cdc_dev, list_entry);
         CDC_EXIT_CRITICAL();
+        new_dev_linked = true;
         _cdc_dev = new_cdc_dev;
     }
     cdc_port->cdc_dev = _cdc_dev;
@@ -1002,11 +1004,15 @@ err:
     }
     if (new_cdc_dev) {
         _cdc_dev_ctrl_free(new_cdc_dev);
-        usb_host_device_close(p_usbh_cdc_obj->cdc_client_hdl, new_cdc_dev->dev_hdl);
-        CDC_ENTER_CRITICAL();
-        SLIST_REMOVE(&(p_usbh_cdc_obj->cdc_devices_list), new_cdc_dev, usbh_cdc_dev_s, list_entry);
-        CDC_EXIT_CRITICAL();
+        if (new_dev_linked) {
+            CDC_ENTER_CRITICAL();
+            SLIST_REMOVE(&(p_usbh_cdc_obj->cdc_devices_list), new_cdc_dev, usbh_cdc_dev_s, list_entry);
+            CDC_EXIT_CRITICAL();
+        }
         free(new_cdc_dev);
+    }
+    if (newly_opened_device) {
+        usb_host_device_close(p_usbh_cdc_obj->cdc_client_hdl, newly_opened_device);
     }
 err_exit:
     xSemaphoreGive(p_usbh_cdc_obj->open_close_mutex);
