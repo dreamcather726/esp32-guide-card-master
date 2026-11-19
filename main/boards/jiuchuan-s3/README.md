@@ -25,13 +25,13 @@
 
 ## BLE 信标日志
 
-`2.1.25` 在开机时启动被动扫描，不连接周围设备。打开 115200 波特率的串口监视器，筛选 `BleBeacon`：
+设备使用被动扫描，不连接周围设备。4G 模式在 ML307 的 AT 接口就绪后开始扫描；Wi-Fi 模式开机开始扫描。打开 115200 波特率的串口监视器，筛选 `BleBeacon`：
 
 ```text
-I (...) BleBeacon: Passive BLE scan started
-I (...) BleBeacon: MAC=12:34:56:78:9A:BC type=public RSSI=-67 dBm
+I (...) BleBeacon: Passive BLE scan started; MAC contains D9:62:62
+I (...) BleBeacon: MAC=D9:62:62:00:00:0D type=public RSSI=-83 dBm
 ```
 
-扫描接收到的 BLE 广播都会按设备地址记录，同一地址的重复报告由控制器过滤，约每 5 秒重新采样。日志使用广播地址：如果信标启用随机地址，显示的 MAC 可能变化。此版本扫描传统 BLE 广播，不解析信标厂商数据或上传扫描结果。
+从 `2.1.28` 起，只打印广播地址中包含 `D9:62:62` 的记录。同一地址的重复报告由控制器过滤，约每 5 秒重新采样。信标使用随机地址时，地址变化可能影响匹配。扫描只处理传统 BLE 广播，不解析信标厂商数据或上传结果。
 
 本固件使用 `sdkconfig.jiuchuan-s3`。从旧版构建目录继续编译时，请同步启用该配置里的 NimBLE Observer 选项，或重新生成 sdkconfig。

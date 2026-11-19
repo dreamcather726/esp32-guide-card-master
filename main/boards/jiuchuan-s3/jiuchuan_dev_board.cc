@@ -55,6 +55,7 @@
 namespace {
 #if defined(CONFIG_BT_NIMBLE_ROLE_OBSERVER) && !defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
 constexpr const char* kBeaconTag = "BleBeacon";
+constexpr const char* kBeaconMacFilter = "D9:62:62";
 
 int OnBleBeaconReport(ble_gap_event* event, void*) {
     if (event->type != BLE_GAP_EVENT_DISC) return 0;
@@ -65,6 +66,7 @@ int OnBleBeaconReport(ble_gap_event* event, void*) {
                   static_cast<unsigned>(address[5]), static_cast<unsigned>(address[4]),
                   static_cast<unsigned>(address[3]), static_cast<unsigned>(address[2]),
                   static_cast<unsigned>(address[1]), static_cast<unsigned>(address[0]));
+    if (std::strstr(mac, kBeaconMacFilter) == nullptr) return 0;
     const char* type = report.addr.type == BLE_ADDR_RANDOM ? "random" : "public";
     if (report.rssi == 127) {
         ESP_LOGI(kBeaconTag, "MAC=%s type=%s RSSI=unknown", mac, type);
@@ -87,7 +89,7 @@ void OnBleBeaconSync() {
         result = ble_gap_disc(own_address_type, BLE_HS_FOREVER, &scan, OnBleBeaconReport, nullptr);
     }
     if (result == 0) {
-        ESP_LOGI(kBeaconTag, "Passive BLE scan started");
+        ESP_LOGI(kBeaconTag, "Passive BLE scan started; MAC contains %s", kBeaconMacFilter);
     } else if (result != BLE_HS_EALREADY) {
         ESP_LOGE(kBeaconTag, "BLE scan failed: %d", result);
     }
