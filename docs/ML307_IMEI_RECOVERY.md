@@ -116,3 +116,18 @@ On the board, check for `ML307 AT control interface detected`, followed by a
 valid IMEI and `AT+CSQ`. Then confirm that `BleBeacon` reports, RNDIS and both
 MQTT sessions coexist. The BLE start depends on the AT port in 4G mode, so
 missing or nonresponsive modules leave BLE unstarted until an AT probe succeeds.
+
+## One recovery attempt when the modem never enumerates (2.1.30)
+
+If the boot worker sees no ML307 after its initial 12-second wait, Jiuchuan S3
+rechecks both USB presence and network readiness on the application task.
+If still missing, it restarts the ESP32 once and enables root-port power during
+USB host installation on the second attempt. CDC event delivery still waits
+for the AT and RNDIS callbacks. This does not directly power-cycle the modem.
+
+The retry marker lives in RTC memory and is honored only after a software
+reset. If the second boot still cannot enumerate the modem, the display shows
+`4G USB ERR` and the worker can still handle a later USB attach. It does not
+keep rebooting. A missing USB modem and an offline network cannot fetch OTA,
+so use a previously working connection or the board's programming interface
+to install this image.

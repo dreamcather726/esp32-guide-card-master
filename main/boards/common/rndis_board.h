@@ -37,6 +37,7 @@ private:
     std::function<void(const std::string&)> usb_at_line_callback_;
     std::string imei_;
     const bool monitor_signal_;
+    const bool power_root_port_early_;
     std::atomic<int> cellular_csq_{-1};
     uint8_t usb_device_addr_ = 0;
     uint16_t usb_device_pid_ = 0;
@@ -67,6 +68,7 @@ private:
 protected:
     NetworkEventCallback network_event_callback_ = nullptr;
     virtual void OnUsbAtReady() {}
+    bool HasUsbModem();
 
     virtual std::string GetBoardJson() override;
 
@@ -74,7 +76,8 @@ protected:
     void OnNetworkEvent(NetworkEvent event, const std::string& data = "");
 
 public:
-    explicit RndisBoard(bool initialize_usb = true, bool monitor_signal = false);
+    explicit RndisBoard(bool initialize_usb = true, bool monitor_signal = false,
+                        bool power_root_port_early = false);
     virtual ~RndisBoard();
     
     virtual std::string GetBoardType() override;

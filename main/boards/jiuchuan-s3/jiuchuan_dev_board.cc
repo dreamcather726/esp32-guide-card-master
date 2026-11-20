@@ -20,6 +20,8 @@
 #include <driver/sdmmc_host.h>
 #include <driver/spi_common.h>
 #include <esp_lcd_panel_vendor.h>
+#include <esp_attr.h>
+#include <esp_system.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
@@ -53,6 +55,14 @@
 #define BOARD_TAG "JiuchuanDevBoard"
 
 namespace {
+constexpr uint32_t kModemRetryMarker = 0x4d4c3337;
+RTC_NOINIT_ATTR uint32_t modem_retry_marker;
+
+bool UseEarlyUsbPowerOnRetry() {
+    if (esp_reset_reason() != ESP_RST_SW) modem_retry_marker = 0;
+    return modem_retry_marker == kModemRetryMarker;
+}
+
 #if defined(CONFIG_BT_NIMBLE_ROLE_OBSERVER) && !defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
 constexpr const char* kBeaconTag = "BleBeacon";
 constexpr const char* kBeaconMacFilter = "D9:62:62";
@@ -652,6 +662,7 @@ class JiuchuanDevBoard : public RndisBoard {
 private:
     bool cellular_network_ = true;
     std::atomic<bool> startup_pending_{true};
+    bool modem_missing_ = false;
     bool startup_network_started_ = false;
     std::atomic<bool> startup_transport_started_{false};
     std::atomic<bool> startup_network_ready_{false};
@@ -1582,7 +1593,7 @@ private:
 
 public:
     JiuchuanDevBoard()
-        : RndisBoard(PrepareBoardForStartup(), true),
+        : RndisBoard(PrepareBoardForStartup(), true, UseEarlyUsbPowerOnRetry()),
           boot_button_(BOOT_BUTTON_GPIO),
           volume_up_button_(WIFI_BUTTON_GPIO),
           volume_down_button_(CMD_BUTTON_GPIO),
@@ -1851,6 +1862,27 @@ public:
             if (event == NetworkEvent::Disconnected || event == NetworkEvent::Scanning)
                 startup_network_ready_ = false;
             if (callback) callback(event, data);
+            if (event == NetworkEvent::ModemDetecting && data == "ML307 USB") {
+                Application::GetInstance().Schedule([this]() {
+                    if (HasUsbModem() || IsNetworkReady() || !startup_pending_.load()) return;
+                    if (modem_retry_marker != kModemRetryMarker) {
+                        modem_retry_marker = kModemRetryMarker;
+                        ESP_LOGW(BOARD_TAG, "[USB_BOOT] Retrying ML307 with early USB port power");
+                        esp_restart();
+                        return;
+                    }
+                    modem_missing_ = true;
+                    display_->SetStatus("4G USB ERR");
+                });
+            } else if (event == NetworkEvent::Connected ||
+                       (event == NetworkEvent::Connecting && data == "ML307 USB")) {
+                Application::GetInstance().Schedule([this]() {
+                    if (modem_missing_ && startup_pending_.load()) {
+                        display_->SetStatus(Lang::Strings::INITIALIZING);
+                    }
+                    modem_missing_ = false;
+                });
+            }
         };
         if (cellular_network_) {
             RndisBoard::SetNetworkEventCallback(std::move(wrapped));

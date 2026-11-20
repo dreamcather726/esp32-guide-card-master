@@ -402,7 +402,8 @@ esp_err_t usbh_cdc_driver_install(const usbh_cdc_driver_config_t *config)
     bool root_port_power_pending = false;
     if (!config->skip_init_usb_host_driver) {
         BaseType_t core_id = (CONFIG_USBH_TASK_CORE_ID < 0) ? tskNO_AFFINITY : CONFIG_USBH_TASK_CORE_ID;
-        TaskFunction_t entry = config->defer_event_handling ? usb_lib_task_deferred : usb_lib_task;
+        TaskFunction_t entry = config->defer_event_handling && !config->power_root_port_early
+            ? usb_lib_task_deferred : usb_lib_task;
         BaseType_t task_created = xTaskCreatePinnedToCore(entry, "usb_lib", 4096, xTaskGetCurrentTaskHandle(), CONFIG_USBH_TASK_BASE_PRIORITY, NULL, core_id);
         ESP_RETURN_ON_FALSE(task_created == pdPASS, ESP_FAIL, TAG, "xTaskCreatePinnedToCore failed");
         // Wait unit the USB host library is installed

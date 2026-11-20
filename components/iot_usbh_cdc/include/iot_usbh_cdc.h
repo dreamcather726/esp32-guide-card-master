@@ -62,6 +62,7 @@ typedef struct {
     int task_coreid;                           /*!< Core of the driver's task, Set it to -1 to not specify the core. */
     bool skip_init_usb_host_driver;            /*!< Skip initialization of USB host driver */
     bool defer_event_handling;                 /*!< Defer USB event handling and initial root port power when supported and owned by this driver */
+    bool power_root_port_early;                /*!< Keep initial root port power enabled even when client events are deferred */
 } usbh_cdc_driver_config_t;
 
 /**

@@ -75,8 +75,8 @@ static const usb_device_match_id_t kMl307UsbMatchList[] = {
     {.match_flags = static_cast<usb_dev_match_flags_t>(0)},
 };
 
-RndisBoard::RndisBoard(bool initialize_usb, bool monitor_signal)
-    : monitor_signal_(monitor_signal) {
+RndisBoard::RndisBoard(bool initialize_usb, bool monitor_signal, bool power_root_port_early)
+    : monitor_signal_(monitor_signal), power_root_port_early_(power_root_port_early) {
     if (initialize_usb) {
         // Install the USB host early so the native USB interrupt is reserved.
         // Event consumption is deferred until both the board AT callback and
@@ -151,6 +151,7 @@ bool RndisBoard::InitializeUsbCdcHost() {
          .task_coreid = 0,
          .skip_init_usb_host_driver = false,
          .defer_event_handling = true,
+         .power_root_port_early = power_root_port_early_,
      };
      esp_err_t cdc_result = usbh_cdc_driver_install(&config);
      if (cdc_result != ESP_OK && cdc_result != ESP_ERR_INVALID_STATE) {
@@ -699,7 +700,7 @@ void RndisBoard::NetworkTask() {
                 if (!IsNetworkReady()) {
                     ESP_LOGW(TAG, "[USB_BOOT] ML307 has not enumerated after %lu ms; waiting for USB attach",
                              static_cast<unsigned long>(kUsbEnumerationTimeoutMs));
-                    OnNetworkEvent(NetworkEvent::ModemDetecting);
+                    OnNetworkEvent(NetworkEvent::ModemDetecting, "ML307 USB");
                 }
             }
             failures = 0;
@@ -934,6 +935,11 @@ bool RndisBoard::WaitForNetworkReady(uint32_t timeout_ms) {
 bool RndisBoard::IsNetworkReady() const {
     return s_event_group != nullptr &&
            (xEventGroupGetBits(s_event_group) & EVENT_GOT_IP_BIT) != 0;
+}
+
+bool RndisBoard::HasUsbModem() {
+    std::lock_guard<std::mutex> lock(usb_state_mutex_);
+    return usb_device_addr_ != 0;
 }
 
 void RndisBoard::SetPowerSaveLevel(PowerSaveLevel level) {
