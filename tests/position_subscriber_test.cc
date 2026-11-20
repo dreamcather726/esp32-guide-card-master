@@ -1,4 +1,5 @@
 #include "../main/boards/jiuchuan-s3/position_data.h"
+#include "../main/display/diagnostic_channel.h"
 #include <atomic>
 #include <functional>
 #include <iostream>
@@ -15,6 +16,7 @@ using TaskHandle_t = void*;
 constexpr int MQTT_EVENT_ANY = -1, MQTT_EVENT_CONNECTED = 1, MQTT_EVENT_DISCONNECTED = 2,
               MQTT_EVENT_DATA = 3, MQTT_EVENT_ERROR = 4, MQTT_EVENT_BEFORE_CONNECT = 5,
               MQTT_EVENT_SUBSCRIBED = 6;
+constexpr int MQTT_ERROR_TYPE_CONNECTION_REFUSED = 2, MQTT_ERROR_TYPE_SUBSCRIBE_FAILED = 3;
 struct ErrorData {
     int error_type = 0, connect_return_code = 0, esp_tls_last_esp_err = 0,
         esp_tls_stack_err = 0, esp_transport_sock_errno = 0;
@@ -114,6 +116,10 @@ static void xTaskNotifyGive(TaskHandle_t) {}
 struct Display {
     NavigationStatus navigation;
     int updates = 0;
+    std::string business_diagnostic, position_diagnostic;
+    void SetDiagnostic(DiagnosticChannel channel, const char* message) {
+        (channel == DiagnosticChannel::BusinessMqtt ? business_diagnostic : position_diagnostic) = message;
+    }
     void SetNavigationStatus(const NavigationStatus& status) { navigation = status; ++updates; }
 };
 namespace ml307_at {
@@ -255,8 +261,10 @@ int main() {
         EventData event; event.client = &client;
         subscriber.HandleEvent(MQTT_EVENT_BEFORE_CONNECT, &event);
         Connected(); subscriber.HandleEvent(MQTT_EVENT_SUBSCRIBED, &event);
+        assert(board.display.position_diagnostic.empty());
         ErrorData error; error.error_type = 2; error.connect_return_code = 4;
         event.error_handle = &error; subscriber.HandleEvent(MQTT_EVENT_ERROR, &event);
+        assert(board.display.position_diagnostic == "POS MQTT CONNACK 4");
         event.error_handle = nullptr; subscriber.HandleEvent(MQTT_EVENT_ERROR, &event);
         assert(logs.find("[LOGIN] broker=mqtt://example.test:1883") != std::string::npos);
         assert(logs.find("[CONNECTED]") != std::string::npos && logs.find("[SUBSCRIBED]") != std::string::npos);
@@ -306,6 +314,7 @@ int main() {
             manager_task(); on_delay = {}; manager_task = {};
             assert(management_tasks == original_tasks + 1);
             assert(credential_requests - original_requests == 3); // 403 retry backoff 30s, 60s, 120s.
+            assert(board.display.business_diagnostic == "BIZ MQTT HTTP 403");
             assert(manager.position_subscriber_->client_ != nullptr);
             assert(internal_peak == 12288 + 4096 && internal_peak < internal_budget);
         }

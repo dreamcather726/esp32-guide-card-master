@@ -373,8 +373,13 @@ void LocationMqttClient::Start() {
                     &task_handle_) != pdPASS) {
         task_handle_ = nullptr;
         running_ = false;
+        SetScreenDiagnostic("MQTT TASK NO MEM");
         ESP_LOGE(kTag, "failed to create customer MQTT task");
     }
+}
+
+void LocationMqttClient::SetScreenDiagnostic(const char* message) {
+    if (auto* display = board_.GetDisplay()) display->SetDiagnostic(DiagnosticChannel::BusinessMqtt, message);
 }
 
 void LocationMqttClient::Stop() {
@@ -435,6 +440,12 @@ void LocationMqttClient::Run() {
 
         Credentials credentials;
         if (!FetchCredentials(cab_guid, credentials)) {
+            char diagnostic[40] = "BIZ MQTT CRED ERROR";
+            if (last_credentials_http_status_ >= 300) {
+                std::snprintf(diagnostic, sizeof(diagnostic), "BIZ MQTT HTTP %d",
+                              last_credentials_http_status_);
+            }
+            SetScreenDiagnostic(diagnostic);
             credential_failures = std::min<uint32_t>(credential_failures + 1, 8);
             const uint32_t retry_delay =
                 (last_credentials_http_status_ == 401 ||
@@ -470,6 +481,7 @@ void LocationMqttClient::Run() {
             break;
         }
         if (!connected_) {
+            if (!connect_error_reported_) SetScreenDiagnostic("BIZ MQTT LOGIN TIMEOUT");
             ESP_LOGE(kTag, "MQTT WSS did not connect within %u ms", kConnectWaitMs);
             StopMqtt();
             if (WaitOrStop(kRetryDelayMs)) {
@@ -644,6 +656,7 @@ bool LocationMqttClient::StartMqtt(const Credentials& credentials,
                                    const std::string& physical_imei,
                                    const std::string& cab_guid) {
     StopMqtt();
+    connect_error_reported_ = false;
     std::lock_guard<std::mutex> lock(mqtt_mutex_);
 
     active_credentials_ = credentials;
@@ -680,6 +693,7 @@ bool LocationMqttClient::StartMqtt(const Credentials& credentials,
 
     mqtt_client_ = esp_mqtt_client_init(&config);
     if (!mqtt_client_) {
+        SetScreenDiagnostic("BIZ MQTT INIT ERROR");
         ESP_LOGE(kTag, "[INIT_FAILED] broker=%s internal_free=%u internal_largest=%u",
                  BrokerAddressForLog(active_credentials_.wss_url).c_str(),
                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
@@ -693,6 +707,7 @@ bool LocationMqttClient::StartMqtt(const Credentials& credentials,
         result = esp_mqtt_client_start(mqtt_client_);
     }
     if (result != ESP_OK) {
+        SetScreenDiagnostic("BIZ MQTT START ERROR");
         ESP_LOGE(kTag, "[START_FAILED] broker=%s stage=%s error=%s stack=%d internal_free=%u internal_largest=%u; broker login has not started",
                  BrokerAddressForLog(active_credentials_.wss_url).c_str(), stage, esp_err_to_name(result), config.task.stack_size,
                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
@@ -772,6 +787,7 @@ void LocationMqttClient::HandleMqttEvent(int32_t event_id,
             break;
         case MQTT_EVENT_CONNECTED:
             connected_ = true;
+            SetScreenDiagnostic("");
             ESP_LOGI(kTag, "[CONNECTED] broker=%s clientId=%s CONNACK=0", BrokerAddressForLog(active_credentials_.wss_url).c_str(), cab_guid_.c_str());
             SubscribeBusinessTopics(event->client);
             report_requested_ = true;
@@ -780,7 +796,7 @@ void LocationMqttClient::HandleMqttEvent(int32_t event_id,
             }
             break;
         case MQTT_EVENT_DISCONNECTED:
-            connected_ = false;
+            if (connected_.exchange(false)) SetScreenDiagnostic("BIZ MQTT OFFLINE");
             incoming_topic_.clear();
             incoming_payload_.clear();
             incoming_retained_ = false;
@@ -791,8 +807,18 @@ void LocationMqttClient::HandleMqttEvent(int32_t event_id,
             break;
         case MQTT_EVENT_ERROR:
             connected_ = false;
+            connect_error_reported_ = true;
+            SetScreenDiagnostic("BIZ MQTT LINK ERROR");
             if (event->error_handle) {
                 const auto* error = event->error_handle;
+                if (error->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
+                    char diagnostic[40];
+                    std::snprintf(diagnostic, sizeof(diagnostic), "BIZ MQTT CONNACK %d",
+                                  int(error->connect_return_code));
+                    SetScreenDiagnostic(diagnostic);
+                } else if (error->error_type == MQTT_ERROR_TYPE_SUBSCRIBE_FAILED) {
+                    SetScreenDiagnostic("BIZ MQTT SUB ERROR");
+                }
                 ESP_LOGE(kTag, "[ERROR] broker=%s type=%d connack=%d tls_esp=0x%x tls_stack=%d socket_errno=%d",
                          BrokerAddressForLog(active_credentials_.wss_url).c_str(), int(error->error_type), int(error->connect_return_code),
                          int(error->esp_tls_last_esp_err), error->esp_tls_stack_err, error->esp_transport_sock_errno);

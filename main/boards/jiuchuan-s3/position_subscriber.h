@@ -23,11 +23,13 @@ private:
     int64_t received_at_ = 0;  // Protected by navigation_mutex_, including expiry.
     std::mutex navigation_mutex_;
     esp_mqtt_client_handle_t client_ = nullptr;
+    bool mqtt_connected_ = false;
     std::string imei_, topic_, client_id_;
     position::Message message_;
     bool StartClient(const std::string& imei);
     void StopClient();
     void ClearPosition();
+    void SetScreenDiagnostic(const char* message);
     static void Event(void*, esp_event_base_t, int32_t, void*);
     void HandleEvent(int32_t event_id, esp_mqtt_event_handle_t event);
 };

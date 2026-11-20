@@ -94,6 +94,10 @@ std::string RndisBoard::GetBoardType() {
     return "rndis";
 }
 
+void RndisBoard::SetNetworkDiagnostic(DiagnosticChannel channel, const char* message) {
+    if (auto* display = GetDisplay()) display->SetDiagnostic(channel, message);
+}
+
 void RndisBoard::StartNetwork() {
      ESP_ERROR_CHECK(esp_netif_init());
      esp_err_t event_loop_result = esp_event_loop_create_default();
@@ -102,6 +106,7 @@ void RndisBoard::StartNetwork() {
      }
  
      if (!InitializeUsbCdcHost()) {
+         SetNetworkDiagnostic(DiagnosticChannel::Usb, "USB HOST ERROR");
          ESP_LOGE(TAG, "USB CDC host is unavailable; keep the application running without network");
          OnNetworkEvent(NetworkEvent::Disconnected);
          return;
@@ -109,10 +114,15 @@ void RndisBoard::StartNetwork() {
      esp_event_handler_register(IOT_ETH_EVENT, ESP_EVENT_ANY_ID, iot_event_handle, this);
      esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, iot_event_handle, this);
 
-     install_rndis(USB_DEVICE_VENDOR_ANY, USB_DEVICE_PRODUCT_ANY, "USB RNDIS0");
+     if (!install_rndis(USB_DEVICE_VENDOR_ANY, USB_DEVICE_PRODUCT_ANY, "USB RNDIS0")) {
+         SetNetworkDiagnostic(DiagnosticChannel::Network, "4G RNDIS INIT ERROR");
+         OnNetworkEvent(NetworkEvent::Disconnected);
+         return;
+     }
      BaseType_t task_created = xTaskCreate(
          NetworkTaskEntry, "usb_rndis_net", 6144, this, 5, &network_task_handle_);
      if (task_created != pdPASS) {
+         SetNetworkDiagnostic(DiagnosticChannel::Usb, "USB TASK NO MEM");
          ESP_LOGE(TAG, "Failed to create USB RNDIS network task");
          OnNetworkEvent(NetworkEvent::Disconnected);
          return;
@@ -127,6 +137,7 @@ void RndisBoard::StartNetwork() {
      // powered during an ESP32 reset cannot have its enumeration event lost.
      esp_err_t start_result = usbh_cdc_start_event_handling();
      if (start_result != ESP_OK) {
+         SetNetworkDiagnostic(DiagnosticChannel::Usb, "USB PORT START ERROR");
          ESP_LOGE(TAG, "USB CDC event handling start failed: %s",
                   esp_err_to_name(start_result));
          OnNetworkEvent(NetworkEvent::Disconnected);
@@ -260,6 +271,7 @@ void RndisBoard::HandleUsbDeviceDisconnected(uint8_t device_addr) {
         return;
     }
     ESP_LOGW(TAG, "[USB_DIAG] ML307 USB device disconnected: addr=%u", device_addr);
+    SetNetworkDiagnostic(DiagnosticChannel::Usb, "USB DISCONNECTED");
     xEventGroupClearBits(s_event_group, EVENT_GOT_IP_BIT | EVENT_USB_DEVICE_BIT);
     xEventGroupSetBits(s_event_group, EVENT_USB_GONE_BIT | EVENT_USB_AT_RX_BIT |
                                      EVENT_USB_MAINTENANCE_BIT);
@@ -470,7 +482,7 @@ bool RndisBoard::QueryAndCacheImei(uint32_t session) {
 }
 
 bool RndisBoard::OpenAndProbeUsbAtInterface(uint8_t device_addr, uint8_t interface_number,
-                                           uint32_t session) {
+                                           uint32_t session, bool& out_of_memory) {
     {
         std::lock_guard<std::mutex> lock(usb_state_mutex_);
         if (usb_session_ != session || usb_device_addr_ != device_addr) {
@@ -497,6 +509,7 @@ bool RndisBoard::OpenAndProbeUsbAtInterface(uint8_t device_addr, uint8_t interfa
     usbh_cdc_port_handle_t candidate_port = nullptr;
     esp_err_t open_result = usbh_cdc_port_open(&port_config, &candidate_port);
     if (open_result != ESP_OK || !candidate_port) {
+        out_of_memory |= open_result == ESP_ERR_NO_MEM;
         constexpr uint32_t dma_caps = MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL;
         ESP_LOGW(TAG, "[USB_AT] interface %u cannot be opened: %s; dma_free=%u dma_largest=%u internal_free=%u",
                  interface_number, esp_err_to_name(open_result),
@@ -567,13 +580,17 @@ bool RndisBoard::EnsureUsbAtControlPort(uint32_t session) {
 
     ESP_LOGI(TAG, "[USB_AT] detect control port for PID=%04x", device_pid);
     const auto candidates = ml307_at::ControlCandidates(interfaces.data(), interface_count);
+    bool out_of_memory = false;
     for (uint8_t candidate : candidates) {
-        if (OpenAndProbeUsbAtInterface(device_addr, candidate, session)) {
+        if (OpenAndProbeUsbAtInterface(device_addr, candidate, session, out_of_memory)) {
             std::string response;
             SendUsbAtCommand("ATE0", response, 2000, session);
             OnUsbAtReady();
             return true;
         }
+    }
+    if (HasUsbModem()) {
+        SetNetworkDiagnostic(DiagnosticChannel::Usb, out_of_memory ? "AT NO MEM" : "AT NO RESPONSE");
     }
     ESP_LOGW(TAG, "[USB_AT] no AT response on eligible control interfaces; background retry scheduled");
     return false;
@@ -605,12 +622,14 @@ bool RndisBoard::DetectAndDialUsbAt() {
     if (!identity_ready) {
         identity_ready = QueryAndCacheImei(session);
     }
+    if (HasUsbModem()) SetNetworkDiagnostic(DiagnosticChannel::Usb, identity_ready ? "" : "IMEI READ ERROR");
     if (IsNetworkReady()) {
         ESP_LOGD(TAG, "[USB_AT] RNDIS online; preserve data session, IMEI=%s; no dial-up",
                  identity_ready ? "ready" : "pending");
         return identity_ready;
     }
     if (dial_already_accepted) {
+        SetNetworkDiagnostic(DiagnosticChannel::Network, IsNetworkReady() ? "" : "4G NO IP");
         return identity_ready;
     }
 
@@ -663,8 +682,10 @@ bool RndisBoard::DetectAndDialUsbAt() {
             return false;
         }
         usb_at_dial_succeeded_ = true;
+        SetNetworkDiagnostic(DiagnosticChannel::Network, IsNetworkReady() ? "" : "4G WAIT IP");
         ESP_LOGI(TAG, "[USB_AT] RNDIS dial-up command accepted; waiting for USB RNDIS enumeration");
     } else {
+        SetNetworkDiagnostic(DiagnosticChannel::Network, IsNetworkReady() ? "" : "4G DIAL ERROR");
         ESP_LOGE(TAG, "[USB_AT] RNDIS dial-up command failed");
     }
     return dialed && identity_ready;
@@ -708,6 +729,7 @@ void RndisBoard::NetworkTask() {
             continue;
         }
         if (bits & EVENT_USB_DEVICE_BIT) {
+            SetNetworkDiagnostic(DiagnosticChannel::Usb, "");
             failures = 0;
             if (!IsNetworkReady()) {
                 OnNetworkEvent(NetworkEvent::Connecting, "ML307 USB");
@@ -797,6 +819,7 @@ void RndisBoard::iot_event_handle(void *arg, esp_event_base_t event_base, int32_
                 board->usb_at_dial_succeeded_ = false;
                 xEventGroupSetBits(board->s_event_group, EVENT_USB_MAINTENANCE_BIT);
             }
+            static_cast<RndisBoard*>(arg)->SetNetworkDiagnostic(DiagnosticChannel::Network, "4G LINK DOWN");
             static_cast<RndisBoard*>(arg)->OnNetworkEvent(NetworkEvent::Disconnected);
             break;
         default:
@@ -809,6 +832,7 @@ void RndisBoard::iot_event_handle(void *arg, esp_event_base_t event_base, int32_
         // previous order allowed the first MQTT HTTP request to race DNS setup.
         ConfigureRndisDns(board->s_rndis_netif);
         xEventGroupSetBits(board->s_event_group, EVENT_GOT_IP_BIT | EVENT_USB_MAINTENANCE_BIT);
+        board->SetNetworkDiagnostic(DiagnosticChannel::Network, "");
         ESP_LOGI(TAG, "USB RNDIS GOT_IP");
         board->OnNetworkEvent(NetworkEvent::Connected, "USB RNDIS");
     }
@@ -843,13 +867,14 @@ void RndisBoard::SetNetworkEventCallback(NetworkEventCallback callback) {
     network_event_callback_ = std::move(callback);
 }
 
-void RndisBoard::install_rndis(uint16_t idVendor, uint16_t idProduct, const char *netif_name)
+bool RndisBoard::install_rndis(uint16_t idVendor, uint16_t idProduct, const char *netif_name)
 {
     esp_err_t ret = ESP_OK;
     iot_eth_handle_t eth_handle = nullptr;
     iot_eth_netif_glue_handle_t glue = nullptr;
 
     usb_device_match_id_t *dev_match_id = (usb_device_match_id_t*)calloc(2, sizeof(usb_device_match_id_t));
+    if (dev_match_id == nullptr) return false;
     dev_match_id[0].match_flags = static_cast<usb_dev_match_flags_t>(
         USB_DEVICE_ID_MATCH_VENDOR | USB_DEVICE_ID_MATCH_PRODUCT);
     dev_match_id[0].idVendor = idVendor;
@@ -862,7 +887,8 @@ void RndisBoard::install_rndis(uint16_t idVendor, uint16_t idProduct, const char
     ret = iot_eth_new_usb_rndis(&rndis_cfg, &rndis_eth_driver);
     if (ret != ESP_OK || rndis_eth_driver == NULL) {
         ESP_LOGE(TAG, "Failed to create USB RNDIS driver");
-        return;
+        free(dev_match_id);
+        return false;
     }
 
     iot_eth_config_t eth_cfg = {
@@ -872,7 +898,7 @@ void RndisBoard::install_rndis(uint16_t idVendor, uint16_t idProduct, const char
     ret = iot_eth_install(&eth_cfg, &eth_handle);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to install USB RNDIS driver");
-        return;
+        return false;
     }
 
     esp_netif_inherent_config_t _inherent_eth_config = ESP_NETIF_INHERENT_DEFAULT_ETH();
@@ -886,16 +912,15 @@ void RndisBoard::install_rndis(uint16_t idVendor, uint16_t idProduct, const char
     s_rndis_netif = esp_netif_new(&netif_cfg);
     if (s_rndis_netif == NULL) {
         ESP_LOGE(TAG, "Failed to create network interface");
-        return;
+        return false;
     }
 
     glue = iot_eth_new_netif_glue(eth_handle);
     if (glue == NULL) {
         ESP_LOGE(TAG, "Failed to create netif glue");
-        return;
+        return false;
     }
-    esp_netif_attach(s_rndis_netif, glue);
-    iot_eth_start(eth_handle);
+    return esp_netif_attach(s_rndis_netif, glue) == ESP_OK && iot_eth_start(eth_handle) == ESP_OK;
 }
  
 

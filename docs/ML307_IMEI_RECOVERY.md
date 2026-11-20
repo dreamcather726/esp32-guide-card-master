@@ -131,3 +131,21 @@ reset. If the second boot still cannot enumerate the modem, the display shows
 keep rebooting. A missing USB modem and an offline network cannot fetch OTA,
 so use a previously working connection or the board's programming interface
 to install this image.
+
+## LCD diagnostics (2.1.31)
+
+The black strip above the bottom row can show faults from several startup
+stages at once. The QR splash briefly covers the strip. Each stage clears
+its own message on recovery.
+
+| LCD message | Meaning |
+| --- | --- |
+| `USB NO DEVICE` | ML307 USB enumeration timed out after the boot retry. |
+| `USB HOST ERROR`, `USB PORT START ERROR` | The USB host or USB event handling could not start. |
+| `AT NO MEM`, `AT NO RESPONSE`, `IMEI READ ERROR` | USB was detected, but AT port setup, AT response, or IMEI retrieval failed. |
+| `4G DIAL ERROR`, `4G NO IP` | Modem dial-up failed or the RNDIS interface has no IP address. |
+| `QR WAIT IMEI`, `QR WAIT NETWORK`, `WAV WAIT NETWORK` | Startup is waiting for a device identifier or a network connection. |
+| `TF MOUNT ERROR`, `QR TF ERROR`, `WAV TF ERROR` | Startup could not mount the card or access the indicated file. |
+| `BIZ MQTT HTTP 403` | The credential service denied the request for the business MQTT client. |
+| `BIZ MQTT` or `POS MQTT` followed by `START ERROR` | The indicated MQTT client could not start. |
+| `BIZ MQTT` or `POS MQTT` followed by `CONNACK n` | The broker rejected the indicated client's connection with code `n`. |

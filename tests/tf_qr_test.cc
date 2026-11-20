@@ -85,9 +85,15 @@ struct LvglAllocatedImage : LvglImage {
     LvglAllocatedImage(void* data, size_t, int, int, int, int) : pixels(data) {}
     ~LvglAllocatedImage() override { heap_caps_free(pixels); }
 };
+#include "../main/display/diagnostic_channel.h"
 struct NoEmojiSpiLcdDisplay {
     int shows = 0;
     std::unique_ptr<LvglImage> image;
+    std::string diagnostic;
+    void SetDiagnostic(DiagnosticChannel channel, const char* value) {
+        Check(channel == DiagnosticChannel::Qr, "wrong QR diagnostic channel");
+        diagnostic = value;
+    }
     void SetStartupQrImage(std::unique_ptr<LvglImage> value, const std::string& imei) {
         Check(imei == kImei, "startup display IMEI mismatch");
         ++shows; image = std::move(value);
@@ -179,6 +185,7 @@ struct TestBoard {
     std::string imei = kImei;
     std::vector<std::string> storage_errors;
     std::string GetImei() const { return imei; }
+    NoEmojiSpiLcdDisplay* GetDisplay() { return display_; }
     FakeNetwork* GetNetwork() { return network_present ? &network : nullptr; }
     bool IsNetworkReady() const { return ready; }
     bool WaitForNetworkReady(int timeout) {

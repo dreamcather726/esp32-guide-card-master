@@ -10,6 +10,7 @@
 #include "iot_usbh_cdc.h"
 #include "iot_eth_netif_glue.h"
 #include "ml307_at.h"
+#include "diagnostic_channel.h"
 #include <esp_netif.h>
 #include <esp_event.h>
 #include <freertos/FreeRTOS.h>
@@ -48,7 +49,8 @@ private:
     bool cdc_driver_ready_ = false;
 
     bool InitializeUsbCdcHost();
-    void install_rndis(uint16_t idVendor, uint16_t idProduct, const char *netif_name);
+    bool install_rndis(uint16_t idVendor, uint16_t idProduct, const char *netif_name);
+    void SetNetworkDiagnostic(DiagnosticChannel channel, const char* message);
     static void iot_event_handle(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
     static void UsbDeviceEventCallback(usbh_cdc_device_event_t event,
                                        usbh_cdc_device_event_data_t *event_data,
@@ -61,7 +63,8 @@ private:
     void NetworkTask();
     bool DetectAndDialUsbAt();
     bool EnsureUsbAtControlPort(uint32_t session);
-    bool OpenAndProbeUsbAtInterface(uint8_t device_addr, uint8_t interface_number, uint32_t session);
+    bool OpenAndProbeUsbAtInterface(uint8_t device_addr, uint8_t interface_number,
+                                    uint32_t session, bool& out_of_memory);
     bool SendUsbAtCommand(const std::string& command, std::string& response,
                           uint32_t timeout_ms, uint32_t expected_session = 0);
     bool QueryAndCacheImei(uint32_t session);

@@ -47,6 +47,7 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> connected_{false};
+    std::atomic<bool> connect_error_reported_{false};
     std::atomic<bool> report_requested_{false};
     std::atomic<bool> shutdown_scheduled_{false};
     int last_credentials_http_status_ = 0;
@@ -81,6 +82,7 @@ private:
                                void* event_data);
 
     void Run();
+    void SetScreenDiagnostic(const char* message);
     bool WaitOrStop(uint32_t delay_ms);
     bool FetchCredentials(const std::string& cab_guid,
                           Credentials& credentials);

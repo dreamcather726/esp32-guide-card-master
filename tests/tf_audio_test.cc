@@ -114,8 +114,10 @@ struct FakeNetwork {
     }
 };
 
+#include "../main/display/diagnostic_channel.h"
 struct FakeDisplay {
     std::vector<std::string> notifications;
+    void SetDiagnostic(DiagnosticChannel, const char*) {}
     void ShowNotification(const char* text, int) { notifications.emplace_back(text); }
 };
 

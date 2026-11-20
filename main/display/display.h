@@ -4,6 +4,7 @@
 #include "emoji_collection.h"
 #include "navigation_status.h"
 #include "guide_state.h"
+#include "diagnostic_channel.h"
 
 #ifndef CONFIG_USE_EMOTE_MESSAGE_STYLE
 #define HAVE_LVGL 1
@@ -45,6 +46,7 @@ public:
     virtual void SetGpsFixStatus(bool has_fix);
     virtual void SetNavigationStatus(const NavigationStatus&) {}
     virtual void SetGuideView(const GuideView&) {}
+    virtual void SetDiagnostic(DiagnosticChannel, const char*) {}
     virtual void SetTheme(Theme* theme);
     virtual Theme* GetTheme() { return current_theme_; }
     virtual void UpdateStatusBar(bool update_all = false);

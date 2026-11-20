@@ -20,6 +20,10 @@ PositionSubscriber::~PositionSubscriber() {
     StopClient();
 }
 
+void PositionSubscriber::SetScreenDiagnostic(const char* message) {
+    if (auto* display = board_.GetDisplay()) display->SetDiagnostic(DiagnosticChannel::PositionMqtt, message);
+}
+
 void PositionSubscriber::ClearPosition() {
     std::lock_guard<std::mutex> lock(navigation_mutex_);
     received_at_ = 0;
@@ -48,6 +52,7 @@ bool PositionSubscriber::StartClient(const std::string& imei) {
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
     client_ = esp_mqtt_client_init(&config);
     if (!client_) {
+        SetScreenDiagnostic("POS MQTT INIT ERROR");
         ESP_LOGE(kTag, "[INIT_FAILED] broker=%s internal_free=%u internal_largest=%u",
                  JIUCHUAN_POSITION_MQTT_URI,
                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
@@ -58,6 +63,7 @@ bool PositionSubscriber::StartClient(const std::string& imei) {
     const char* stage = result == ESP_OK ? "create_task" : "register_event";
     if (result == ESP_OK) result = esp_mqtt_client_start(client_);
     if (result != ESP_OK) {
+        SetScreenDiagnostic("POS MQTT START ERROR");
         ESP_LOGE(kTag, "[START_FAILED] broker=%s stage=%s error=%s stack=%d internal_free=%u internal_largest=%u; broker login has not started",
                  JIUCHUAN_POSITION_MQTT_URI, stage, esp_err_to_name(result), config.task.stack_size,
                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
@@ -76,6 +82,7 @@ void PositionSubscriber::StopClient() {
         client_ = nullptr;
     }
     message_.Reset();
+    mqtt_connected_ = false;
     ClearPosition();
 }
 
@@ -88,6 +95,7 @@ void PositionSubscriber::Poll() {
     if (!ready || !ml307_at::IsImei(imei)) {
         if (client_) StopClient();
     } else {
+        if (!configured) SetScreenDiagnostic("POS MQTT NO CONFIG");
         if (client_ && imei != imei_) {
             StopClient();
             next_start_ = 0;
@@ -117,13 +125,18 @@ void PositionSubscriber::HandleEvent(int32_t id, esp_mqtt_event_handle_t event) 
     if (id == MQTT_EVENT_BEFORE_CONNECT) {
         ESP_LOGI(kTag, "[LOGIN] broker=%s clientId=%s", JIUCHUAN_POSITION_MQTT_URI, client_id_.c_str());
     } else if (id == MQTT_EVENT_CONNECTED) {
+        mqtt_connected_ = true;
         ESP_LOGI(kTag, "[CONNECTED] broker=%s clientId=%s CONNACK=0", JIUCHUAN_POSITION_MQTT_URI, client_id_.c_str());
         message_.Reset();
         const int message_id = esp_mqtt_client_subscribe(event->client, topic_.c_str(), 0);
+        SetScreenDiagnostic(message_id < 0 ? "POS MQTT SUB ERROR" : "POS MQTT WAIT SUBACK");
         ESP_LOGI(kTag, "[SUBSCRIBE] broker=%s topic=%s message_id=%d", JIUCHUAN_POSITION_MQTT_URI, topic_.c_str(), message_id);
     } else if (id == MQTT_EVENT_SUBSCRIBED) {
+        SetScreenDiagnostic("");
         ESP_LOGI(kTag, "[SUBSCRIBED] broker=%s topic=%s message_id=%d", JIUCHUAN_POSITION_MQTT_URI, topic_.c_str(), event->msg_id);
     } else if (id == MQTT_EVENT_DISCONNECTED) {
+        if (mqtt_connected_) SetScreenDiagnostic("POS MQTT OFFLINE");
+        mqtt_connected_ = false;
         ESP_LOGW(kTag, "[DISCONNECTED] broker=%s; automatic reconnect in 5 seconds", JIUCHUAN_POSITION_MQTT_URI);
         message_.Reset();
         ClearPosition();
@@ -137,6 +150,15 @@ void PositionSubscriber::HandleEvent(int32_t id, esp_mqtt_event_handle_t event) 
             ESP_LOGD(kTag, "Position received: fix=%d nsat=%d", status.has_fix, status.satellites);
         }
     } else if (id == MQTT_EVENT_ERROR) {
+        mqtt_connected_ = false;
+        char diagnostic[40] = "POS MQTT LINK ERROR";
+        if (event->error_handle && event->error_handle->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
+            std::snprintf(diagnostic, sizeof(diagnostic), "POS MQTT CONNACK %d",
+                          int(event->error_handle->connect_return_code));
+        } else if (event->error_handle && event->error_handle->error_type == MQTT_ERROR_TYPE_SUBSCRIBE_FAILED) {
+            std::snprintf(diagnostic, sizeof(diagnostic), "POS MQTT SUB ERROR");
+        }
+        SetScreenDiagnostic(diagnostic);
         if (event->error_handle) {
             const auto* error = event->error_handle;
             ESP_LOGE(kTag, "[ERROR] broker=%s type=%d connack=%d tls_esp=0x%x tls_stack=%d socket_errno=%d",

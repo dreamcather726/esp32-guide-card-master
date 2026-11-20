@@ -1,6 +1,7 @@
 // Production worker/identity methods are included by run_rndis_host_tests.py.
 // Only the USB, RTOS and NVS boundaries are simulated here.
 #include "ml307_at.h"
+#include "../main/display/diagnostic_channel.h"
 #include <functional>
 #include <iostream>
 #include <map>
@@ -38,6 +39,7 @@ struct Environment {
     std::function<void()> on_missing_modem;
     std::map<std::string, std::string> nvs;
     std::vector<std::string> commands;
+    std::string usb_diagnostic, network_diagnostic;
     std::vector<uint32_t> retry_delays;
     std::function<void(EventBits_t, uint32_t)> on_wait;
     std::function<void(const std::string&)> on_command;
@@ -78,6 +80,10 @@ public:
     int GetCellularSignal() const { return cellular_csq_; }
     bool IsCellularNetwork() const { return env->cellular; }
     bool IsNetworkReady() const { return (env->bits & EVENT_GOT_IP_BIT) != 0; }
+    bool HasUsbModem() const { return usb_device_addr_ != 0; }
+    void SetNetworkDiagnostic(DiagnosticChannel channel, const char* message) {
+        (channel == DiagnosticChannel::Usb ? env->usb_diagnostic : env->network_diagnostic) = message;
+    }
     void OnNetworkEvent(NetworkEvent event, const std::string& = "") {
         if (event == NetworkEvent::Connecting) {
             ++env->connecting;

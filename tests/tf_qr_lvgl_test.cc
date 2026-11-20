@@ -9,6 +9,9 @@
 #include <stdexcept>
 #include <vector>
 #include <functional>
+#include <mutex>
+#include <cstdio>
+#include "../main/display/diagnostic_channel.h"
 #define BOARD_TAG "test"
 #define ESP_LOGI(...) ((void)0)
 namespace Lang { namespace Strings { constexpr auto INITIALIZING = "Initializing"; } }
@@ -42,6 +45,7 @@ public:
 class BaseDisplay {
 public:
     virtual void SetChatMessage(const char*, const char*) {}
+    virtual void SetDiagnostic(DiagnosticChannel, const char*) {}
 };
 class TestDisplay : public BaseDisplay {
 public:
@@ -82,10 +86,12 @@ public:
         chat_message_label_ = lv_label_create(bottom_bar_);
         lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
         status_label_ = lv_label_create(screen);
+        InitDiagnostics();
     }
     void StopSubtitleScrolling() {}
     void ConfigureSubtitleScrolling(int) {}
 #include "tf_qr_display_production.inc"
+#include "diagnostics_production.inc"
 };
 
 static void Check(bool condition, const char* message) {
@@ -112,12 +118,22 @@ int main() {
     TestDisplay board;
     int completed = 0;
     board.BeginStartupPresentation([&]() { ++completed; });
+    board.ShowStartupInitializing();
+    board.SetDiagnostic(DiagnosticChannel::Usb, "USB NO DEVICE");
+    board.SetDiagnostic(DiagnosticChannel::Qr, "QR WAIT IMEI");
+    board.RefreshDiagnostics();
+    lv_obj_update_layout(lv_screen_active());
+    lv_refr_now(display);
+    const auto pixel = [](int x, int y) { return framebuffer[y * 240 + x]; };
+    Check(std::strcmp(lv_label_get_text(board.diagnostic_label_), "USB NO DEVICE\nQR WAIT IMEI") == 0,
+          "the USB and QR explanations should both be visible");
+    Check(pixel(7, 112) == 0, "diagnostics should render above the bottom status icons");
     board.SetStartupQrImage(std::make_unique<LvglImage>(300), "864479086534998");
     lv_obj_update_layout(lv_screen_active());
     lv_refr_now(display);
     Check(lv_image_get_transformed_width(board.startup_qr_widget_) <= 99, "QR width exceeds viewport");
     Check(lv_image_get_transformed_height(board.startup_qr_widget_) <= 99, "QR height exceeds viewport");
-    auto pixel = [](int x, int y) { return framebuffer[y * 240 + x]; };
+    Check(pixel(7, 112) == 0xffff, "diagnostics cover the QR");
     Check(pixel(85, 26) == 0xf800, "top-left QR content clipped or red byte order incorrect");
     Check(pixel(155, 26) == 0x07e0, "top-right QR content clipped or green byte order incorrect");
     Check(pixel(85, 81) == 0x001f, "bottom-left QR content clipped or blue byte order incorrect");
@@ -139,6 +155,10 @@ int main() {
     lv_tick_inc(1); lv_timer_handler();
     Check(completed == 1 && board.startup_overlay_ == nullptr, "splash did not finish at 3 seconds");
     Check(!board.startup_qr_image_, "splash pixels retained after finish");
+    board.SetDiagnostic(DiagnosticChannel::Usb, "");
+    board.SetDiagnostic(DiagnosticChannel::Qr, "");
+    board.RefreshDiagnostics();
+    Check(lv_obj_has_flag(board.diagnostic_label_, LV_OBJ_FLAG_HIDDEN), "resolved diagnostics stayed visible");
     Check(std::strcmp(lv_label_get_text(board.status_label_), "Initializing") == 0, "initialization status missing");
     board.SetStartupQrImage(std::make_unique<LvglImage>(300), "864479086534998");
     lv_tick_inc(5000); lv_timer_handler();

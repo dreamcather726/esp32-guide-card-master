@@ -36,6 +36,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cstdio>
@@ -204,6 +205,10 @@ private:
     std::unique_ptr<GuidePages> guide_pages_;
     GuideView guide_view_;
     NavigationStatus navigation_status_;
+    std::mutex diagnostic_mutex_;
+    std::array<std::array<char, 40>, static_cast<size_t>(DiagnosticChannel::Count)> diagnostics_{};
+    bool diagnostic_dirty_ = false;
+    lv_obj_t* diagnostic_label_ = nullptr;
     const RndisBoard& rndis_board_;
     int subtitle_scroll_offset_ = 0;
     int subtitle_scroll_max_offset_ = 0;
@@ -218,6 +223,42 @@ private:
     lv_timer_t* startup_timer_ = nullptr;
     bool startup_finished_ = false;
     std::function<void()> startup_completion_;
+
+    void InitDiagnostics() {
+        diagnostic_label_ = lv_label_create(lv_screen_active());
+        lv_obj_set_width(diagnostic_label_, width_ - 12);
+        lv_label_set_long_mode(diagnostic_label_, LV_LABEL_LONG_CLIP);
+        lv_obj_set_style_text_font(diagnostic_label_, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(diagnostic_label_, lv_color_white(), 0);
+        lv_obj_set_style_text_line_space(diagnostic_label_, -1, 0);
+        lv_obj_set_style_bg_color(diagnostic_label_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(diagnostic_label_, LV_OPA_COVER, 0);
+        lv_obj_set_style_pad_all(diagnostic_label_, 3, 0);
+        lv_obj_align(diagnostic_label_, LV_ALIGN_BOTTOM_MID, 0, -21);
+        lv_obj_add_flag(diagnostic_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    void RefreshDiagnostics() {
+        decltype(diagnostics_) snapshot;
+        {
+            std::lock_guard lock(diagnostic_mutex_);
+            if (!diagnostic_dirty_) return;
+            snapshot = diagnostics_;
+            diagnostic_dirty_ = false;
+        }
+        std::string text;
+        for (const auto& line : snapshot) {
+            if (line.front() == '\0') continue;
+            if (!text.empty()) text += '\n';
+            text += line.data();
+        }
+        if (text.empty()) {
+            lv_obj_add_flag(diagnostic_label_, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+        lv_label_set_text(diagnostic_label_, text.c_str());
+        lv_obj_remove_flag(diagnostic_label_, LV_OBJ_FLAG_HIDDEN);
+    }
 
     static void SetSubtitleY(void* object, int32_t value) {
         lv_obj_set_y(static_cast<lv_obj_t*>(object), value);
@@ -398,6 +439,7 @@ public:
         guide_pages_ = std::make_unique<GuidePages>(lv_screen_active(), width_, height_,
             lv_obj_get_style_text_font(chat_message_label_, LV_PART_MAIN));
         navigation_ = std::make_unique<NavigationOverlay>(lv_screen_active(), width_, height_);
+        InitDiagnostics();
     }
 
     ~NoEmojiSpiLcdDisplay() override {
@@ -410,6 +452,7 @@ public:
         }
         navigation_.reset();
         guide_pages_.reset();
+        lv_obj_delete(diagnostic_label_);
         StopSubtitleScrolling();
         if (subtitle_scroll_timer_ != nullptr) {
             lv_timer_delete(subtitle_scroll_timer_);
@@ -637,6 +680,14 @@ public:
         ApplyGuideView();
     }
 
+    void SetDiagnostic(DiagnosticChannel channel, const char* message) override {
+        std::lock_guard lock(diagnostic_mutex_);
+        auto& line = diagnostics_[static_cast<size_t>(channel)];
+        if (std::strcmp(line.data(), message) == 0) return;
+        std::snprintf(line.data(), line.size(), "%s", message);
+        diagnostic_dirty_ = true;
+    }
+
     void UpdateStatusBar(bool update_all = false) override {
         // Preserve the existing low-battery warning and device status updates.
         SpiLcdDisplay::UpdateStatusBar(update_all);
@@ -644,6 +695,7 @@ public:
         bool charging = false, discharging = false;
         if (!Board::GetInstance().GetBatteryLevel(level, charging, discharging)) level = -1;
         DisplayLockGuard lock(this);
+        RefreshDiagnostics();
         if (navigation_) {
             navigation_->SetSignal(rndis_board_.GetCellularSignal());
             navigation_->SetBattery(level);
@@ -878,6 +930,7 @@ private:
         } else {
             ESP_LOGE(BOARD_TAG, "SD card unavailable: %s", esp_err_to_name(result));
             if (GetDisplay()) {
+                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "TF MOUNT ERROR");
                 GetDisplay()->ShowNotification("内部存储错误", 5000);
             }
         }
@@ -1061,6 +1114,7 @@ private:
         std::string error;
         const auto state = CheckStartAudio(kStartAudioPath, error);
         if (state == TfAudioState::StorageError) {
+            GetDisplay()->SetDiagnostic(DiagnosticChannel::Audio, "WAV TF ERROR");
             ShowInternalStorageError(error);
             ResolveStartupAudio();
             return;
@@ -1075,6 +1129,7 @@ private:
 
         ESP_LOGI(BOARD_TAG, "[TF_INIT] path=%s needs download: %s",
                  kStartAudioPath, error.c_str());
+        GetDisplay()->SetDiagnostic(DiagnosticChannel::Audio, "WAV WAIT NETWORK");
 
         // Wait/retry only in this worker, including after a slow modem startup
         // or a prolonged outage. Neither display nor network startup waits here.
@@ -1094,15 +1149,18 @@ private:
             }
             const auto result = DownloadInitialStartAudio(error);
             if (result == TfDownloadResult::Success) {
+                GetDisplay()->SetDiagnostic(DiagnosticChannel::Audio, "");
                 Application::GetInstance().NotifyTfStartAudioReady();
                 ResolveStartupAudio();
                 return;
             }
             if (result == TfDownloadResult::StorageError) {
+                GetDisplay()->SetDiagnostic(DiagnosticChannel::Audio, "WAV TF ERROR");
                 ShowInternalStorageError(error);
                 ResolveStartupAudio();
                 return;
             }
+            GetDisplay()->SetDiagnostic(DiagnosticChannel::Audio, "WAV DOWNLOAD RETRY");
             attempt = std::min(attempt + 1, 6U);
             const uint32_t delay_ms = std::min(2000U << (attempt - 1), 60000U);
             ESP_LOGW(BOARD_TAG, "[TF_INIT][RETRY] %s; retry in %lu ms",
@@ -1125,6 +1183,7 @@ private:
                 "tf_init", 8192, this, 2, &tf_init_task_handle_) != pdPASS) {
             tf_init_task_handle_ = nullptr;
             ShowInternalStorageError("TF initialization task creation failed");
+            GetDisplay()->SetDiagnostic(DiagnosticChannel::Audio, "WAV TASK NO MEM");
             ResolveStartupAudio();
         }
     }
@@ -1360,6 +1419,7 @@ private:
             }
             const bool has_imei = ml307_at::IsImei(imei);
             if (!has_imei && !local_phase) {
+                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR WAIT IMEI");
                 ESP_LOGI(BOARD_TAG, "[TF_QR] waiting for device IMEI");
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 continue;
@@ -1372,11 +1432,13 @@ private:
             std::unique_ptr<LvglImage> image;
             const auto state = has_imei ? LoadStartupQr(path, image, error) : TfQrState::NeedsDownload;
             if (state == TfQrState::Ready) {
+                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "");
                 ESP_LOGI(BOARD_TAG, "[TF_QR][READY] local path=%s; skip download", path.c_str());
                 ShowStartupQr(std::move(image), imei);
                 return;
             }
             if (state == TfQrState::StorageError) {
+                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR TF ERROR");
                 ShowInternalStorageError("QR: " + error);
                 FailStartupQr();
                 return;
@@ -1388,23 +1450,30 @@ private:
                     continue;
                 }
                 if (!cellular_network_ && !startup_network_ready_.load()) {
+                    GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR WAIT NETWORK");
                     vTaskDelay(pdMS_TO_TICKS(200));
                     continue;
                 }
-                if (cellular_network_ && !IsNetworkReady() && !WaitForNetworkReady(30000)) {
-                    vTaskDelay(pdMS_TO_TICKS(2000));
-                    continue;
+                if (cellular_network_ && !IsNetworkReady()) {
+                    GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR WAIT NETWORK");
+                    if (!WaitForNetworkReady(30000)) {
+                        vTaskDelay(pdMS_TO_TICKS(2000));
+                        continue;
+                    }
                 }
                 const auto result = DownloadStartupQr(url, path, temporary_path, image, error);
                 if (result == TfDownloadResult::Success) {
+                    GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "");
                     ShowStartupQr(std::move(image), imei);
                     return;
                 }
                 if (result == TfDownloadResult::StorageError) {
+                    GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR TF ERROR");
                     ShowInternalStorageError("QR: " + error);
                     FailStartupQr();
                     return;
                 }
+                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR DOWNLOAD RETRY");
             }
             attempt = std::min(attempt + 1, 6U);
             const uint32_t delay_ms = std::min(2000U << (attempt - 1), 60000U);
@@ -1428,6 +1497,7 @@ private:
                 "tf_qr", 8192, this, 2, &tf_qr_task_handle_) != pdPASS) {
             tf_qr_task_handle_ = nullptr;
             ESP_LOGE(BOARD_TAG, "[TF_QR][ERROR] QR initialization task creation failed");
+            GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR TASK NO MEM");
             FailStartupQr();
         }
     }
@@ -1873,6 +1943,7 @@ public:
                     }
                     modem_missing_ = true;
                     display_->SetStatus("4G USB ERR");
+                    display_->SetDiagnostic(DiagnosticChannel::Usb, "USB NO DEVICE");
                 });
             } else if (event == NetworkEvent::Connected ||
                        (event == NetworkEvent::Connecting && data == "ML307 USB")) {
