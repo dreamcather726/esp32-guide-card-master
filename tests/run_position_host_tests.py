@@ -19,11 +19,19 @@ def main():
         source = (ROOT / "main/boards/jiuchuan-s3/position_subscriber.cc").read_text(encoding="utf-8")
         cabinet = (ROOT / "main/boards/jiuchuan-s3/location_mqtt_client.cc").read_text(encoding="utf-8")
         manager_header = (ROOT / "main/boards/jiuchuan-s3/location_mqtt_client.h").read_text(encoding="utf-8")
+        board = (ROOT / "main/boards/jiuchuan-s3/jiuchuan_dev_board.cc").read_text(encoding="utf-8")
         (temp / "manager.inc").write_text(manager_header[manager_header.index("class LocationMqttClient {"):manager_header.index("#endif")] + "\n" +
             cabinet[cabinet.index("void LocationMqttClient::Start()"):cabinet.index("bool LocationMqttClient::FetchCredentials(")], encoding="utf-8")
         (temp / "broker_log.inc").write_text(cabinet[cabinet.index("std::string BrokerAddressForLog("):
                                                     cabinet.index("constexpr const char* kCredentialsUrl")], encoding="utf-8")
         (temp / "subscriber.inc").write_text(header[header.index("class PositionSubscriber {"):] + "\n" + source[source.index("namespace {"):], encoding="utf-8")
+        (temp / "beacon_report.inc").write_text("\n".join([
+            cabinet[cabinet.index("struct BleBeaconSample"):cabinet.index("std::string Trim(")],
+            cabinet[cabinet.index("void AddString("):cabinet.index("}  // namespace")],
+            cabinet[cabinet.index("void LocationMqttClient::RecordBleBeacon("):cabinet.index("LocationMqttClient::LocationMqttClient(")],
+            board[board.index("constexpr const char* kBeaconTag"):board.index("void OnBleBeaconSync()")],
+            cabinet[cabinet.index("bool LocationMqttClient::PublishOnlineReport("):cabinet.index("void LocationMqttClient::PersistRuntimeCheckpoint(")],
+        ]), encoding="utf-8")
         for name in ("position_data_test", "position_subscriber_test"):
             binary = temp / name
             subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-g",

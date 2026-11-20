@@ -81,6 +81,7 @@ int OnBleBeaconReport(ble_gap_event* event, void*) {
     if (report.rssi == 127) {
         ESP_LOGI(kBeaconTag, "MAC=%s RSSI=unknown", mac);
     } else {
+        LocationMqttClient::RecordBleBeacon(mac, report.rssi);
         ESP_LOGI(kBeaconTag, "MAC=%s RSSI=%d dBm", mac, report.rssi);
     }
     return 0;

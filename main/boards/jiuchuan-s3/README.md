@@ -31,9 +31,15 @@
 
 ```text
 I (...) BleBeacon: Passive BLE scan started; MAC contains D9:62:62
-I (...) BleBeacon: MAC=D9:62:62:00:00:0D type=public RSSI=-83 dBm
+I (...) BleBeacon: MAC=D9:62:62:00:00:0D RSSI=-83 dBm
 ```
 
-从 `2.1.28` 起，只打印广播地址中包含 `D9:62:62` 的记录。同一地址的重复报告由控制器过滤，约每 5 秒重新采样。信标使用随机地址时，地址变化可能影响匹配。扫描只处理传统 BLE 广播，不解析信标厂商数据或上传结果。
+从 `2.1.28` 起，只打印广播地址中包含 `D9:62:62` 的记录。同一地址的重复报告由控制器过滤，约每 5 秒重新采样。信标使用随机地址时，地址变化可能影响匹配。扫描使用传统 BLE 广播的地址和信号强度。
+
+从 `2.1.34` 起，业务 MQTT 会在 `device/broadcast/online` 的 `KJ` 包中带上 `bleBeacons`。MQTT 连接成功时发送状态包，在线后通常每 60 秒更新一次。每个 MAC 保留最近一次有效 RSSI，最多记录 16 台，90 秒内没有有效采样的记录不会进入上报。数组为空表示没有符合条件的近期记录。
+
+```json
+{"cmd":"KJ","bleBeacons":[{"macAddress":"D9:62:62:00:00:0D","rssi":-83}]}
+```
 
 本固件使用 `sdkconfig.jiuchuan-s3`。从旧版构建目录继续编译时，请同步启用该配置里的 NimBLE Observer 选项，或重新生成 sdkconfig。

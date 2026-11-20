@@ -1,5 +1,6 @@
 #include "../main/boards/jiuchuan-s3/position_data.h"
 #include "../main/display/diagnostic_channel.h"
+#include <array>
 #include <atomic>
 #include <functional>
 #include <iostream>
@@ -133,6 +134,17 @@ struct RndisBoard {
     bool IsCellularNetwork() const { return cellular; }
     bool IsNetworkReady() const { return ready; }
     std::string GetImei() const { return imei; }
+    struct Binding {
+        std::string user_guid, boot_id, usage_session_id;
+        int state = 0;
+        unsigned version = 0;
+    };
+    struct Codec { int output_volume() const { return 40; } };
+    struct Backlight { int brightness() const { return 70; } };
+    Binding GetUserBinding() const { return {}; }
+    bool GetBatteryLevel(int& level, bool&, bool&) const { level = 76; return true; }
+    Codec* GetAudioCodec() const { return nullptr; }
+    Backlight* GetBacklight() const { return nullptr; }
 };
 #define ESP_LOGI Log
 #define ESP_LOGW Log
@@ -150,14 +162,40 @@ struct RndisBoard {
 constexpr uint32_t kRetryDelayMs = 2000, kUnauthorizedRetryDelayMs = 30000,
     kConnectWaitMs = 30000, kReconnectGraceMs = 60000, kOnlineReportIntervalSeconds = 60;
 constexpr int kCredentialRefreshMarginSeconds = 300;
+constexpr const char* kOnlineTopic = "device/broadcast/online";
 class SdContentManager {};
 struct Application {
     static Application& GetInstance() { static Application instance; return instance; }
     void NotifyCustomerMqttOnline() {}
+    std::string GetCurrentRoleId() const { return "test-role"; }
+    uint64_t GetSdAudioPlaybackDurationSeconds() const { return 0; }
+    uint32_t GetConversationCount() const { return 0; }
 };
 #define private public
 #include "manager.inc"
 #undef private
+
+struct ble_gap_event {
+    int type;
+    struct {
+        struct { uint8_t val[6]; } addr;
+        int8_t rssi;
+    } disc;
+};
+constexpr int BLE_GAP_EVENT_DISC = 1;
+static const char* BindingStateName(int) { return "unbound"; }
+static void GetSdCardSpaceKb(uint64_t&, uint64_t&) {}
+struct SystemInfo { static std::string GetMacAddress() { return "AA:BB:CC:DD:EE:FF"; } };
+struct esp_app_desc_t { char version[32]; };
+static const esp_app_desc_t* esp_app_get_description() { static const esp_app_desc_t info{"2.1.34"}; return &info; }
+static std::string online_payload;
+static int esp_mqtt_client_publish(Client*, const char* address, const char* payload, int len, int qos, int retain) {
+    assert(std::string(address) == kOnlineTopic && len == 0 && qos == 0 && retain == 0);
+    online_payload = payload;
+    return 1;
+}
+#include "beacon_report.inc"
+
 static int credential_requests = 0;
 LocationMqttClient::LocationMqttClient(RndisBoard& board, std::function<bool()> ready)
     : board_(board), position_subscriber_(std::make_unique<PositionSubscriber>(board, std::move(ready))) {}
@@ -168,7 +206,6 @@ bool LocationMqttClient::FetchCredentials(const std::string&, Credentials&) {
 bool LocationMqttClient::StartMqtt(const Credentials&, const std::string&, const std::string&) { assert(false); return false; }
 void LocationMqttClient::StopMqtt() {}
 void LocationMqttClient::QuerySignalStrength() {}
-bool LocationMqttClient::PublishOnlineReport() { return true; }
 void LocationMqttClient::PersistRuntimeCheckpoint() {}
 
 static void RunTicks(PositionSubscriber& subscriber) {
@@ -187,6 +224,57 @@ static void Payload(const std::string& body, bool retained = false) {
 }
 
 int main() {
+    {
+        RndisBoard board;
+        LocationMqttClient manager(board, [] { return true; });
+        manager.mqtt_client_ = &client;
+        manager.connected_ = true;
+        manager.physical_imei_ = board.imei;
+        manager.cab_guid_ = board.imei + "s3";
+        const auto report = [&] {
+            assert(manager.PublishOnlineReport());
+            std::unique_ptr<cJSON, decltype(&cJSON_Delete)> json(cJSON_Parse(online_payload.c_str()), cJSON_Delete);
+            assert(json);
+            return json;
+        };
+        const auto beacons = [](const cJSON* json) {
+            const auto* array = cJSON_GetObjectItemCaseSensitive(json, "bleBeacons");
+            assert(cJSON_IsArray(array));
+            return array;
+        };
+        ble_gap_event event{BLE_GAP_EVENT_DISC, {{{0x0D, 0, 0, 0x62, 0x62, 0xD9}}, -83}};
+        OnBleBeaconReport(&event, nullptr);
+        event.disc.rssi = -71;
+        OnBleBeaconReport(&event, nullptr);
+        event.disc.rssi = 127;
+        OnBleBeaconReport(&event, nullptr);
+        event.disc.addr.val[5] = 0xD8;
+        event.disc.rssi = -65;
+        OnBleBeaconReport(&event, nullptr);
+        auto json = report();
+        const auto* list = beacons(json.get());
+        assert(cJSON_GetArraySize(list) == 1);
+        const auto* first = cJSON_GetArrayItem(list, 0);
+        assert(std::string(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(first, "macAddress"))) == "D9:62:62:00:00:0D");
+        assert(cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(first, "rssi")) == -71);
+        assert(std::string(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json.get(), "macAddress"))) == "AA:BB:CC:DD:EE:FF");
+
+        event.disc.addr.val[5] = 0xD9;
+        for (int i = 20; i < 36; ++i) {
+            ++now_us;
+            event.disc.addr.val[0] = static_cast<uint8_t>(i);
+            OnBleBeaconReport(&event, nullptr);
+        }
+        json = report();
+        assert(cJSON_GetArraySize(beacons(json.get())) == 16);
+        assert(online_payload.find("D9:62:62:00:00:0D") == std::string::npos);
+        now_us += 90 * 1000 * 1000;
+        json = report();
+        assert(cJSON_GetArraySize(beacons(json.get())) == 0);
+        manager.mqtt_client_ = nullptr;
+        manager.connected_ = false;
+        std::cout << "PASS BLE filter through KJ publication: latest RSSI, capacity, expiry and device MAC\n";
+    }
     {
         RndisBoard board;
         PositionSubscriber subscriber(board, []() { return true; });

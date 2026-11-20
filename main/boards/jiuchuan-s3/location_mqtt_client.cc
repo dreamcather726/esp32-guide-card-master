@@ -22,11 +22,13 @@
 #include <http.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <climits>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cerrno>
 #include <initializer_list>
 #include <vector>
@@ -57,6 +59,40 @@ constexpr uint32_t kReconnectGraceMs = 60000;
 constexpr uint32_t kOnlineReportIntervalSeconds = 60;
 constexpr int kDefaultCredentialSeconds = 3600;
 constexpr int kCredentialRefreshMarginSeconds = 300;
+
+struct BleBeaconSample {
+    char mac[18]{};
+    int rssi = 0;
+    int64_t seen_us = 0;
+};
+
+constexpr int64_t kBleBeaconMaxAgeUs = 90LL * 1000 * 1000;
+// Scanning can start before the MQTT manager exists. Keep a fixed-size cache
+// shared by the scan callback and the MQTT worker.
+std::mutex ble_beacon_mutex;
+std::array<BleBeaconSample, 16> ble_beacons{};
+
+void AddBleBeaconReport(cJSON* root) {
+    const auto snapshot = [] {
+        std::lock_guard lock(ble_beacon_mutex);
+        return ble_beacons;
+    }();
+    const int64_t now = esp_timer_get_time();
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> items(cJSON_CreateArray(), cJSON_Delete);
+    if (!items) return;
+    for (const auto& sample : snapshot) {
+        if (sample.mac[0] == '\0' || now - sample.seen_us >= kBleBeaconMaxAgeUs) continue;
+        auto* entry = cJSON_CreateObject();
+        if (!entry) return;
+        if (!cJSON_AddStringToObject(entry, "macAddress", sample.mac) ||
+            !cJSON_AddNumberToObject(entry, "rssi", sample.rssi) ||
+            !cJSON_AddItemToArray(items.get(), entry)) {
+            cJSON_Delete(entry);
+            return;
+        }
+    }
+    if (cJSON_AddItemToObject(root, "bleBeacons", items.get())) items.release();
+}
 
 std::string Trim(std::string value) {
     auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };
@@ -330,6 +366,25 @@ void AddString(cJSON* root, const char* key, const std::string& value) {
 }
 
 }  // namespace
+
+void LocationMqttClient::RecordBleBeacon(const char (&mac)[18], int rssi) {
+    std::lock_guard lock(ble_beacon_mutex);
+    auto slot = std::find_if(ble_beacons.begin(), ble_beacons.end(), [&](const BleBeaconSample& sample) {
+        return std::strcmp(sample.mac, mac) == 0;
+    });
+    if (slot == ble_beacons.end()) {
+        slot = std::min_element(ble_beacons.begin(), ble_beacons.end(),
+            [](const BleBeaconSample& left, const BleBeaconSample& right) {
+                const bool left_empty = left.mac[0] == '\0';
+                const bool right_empty = right.mac[0] == '\0';
+                if (left_empty != right_empty) return left_empty;
+                return left.seen_us < right.seen_us;
+            });
+        std::memcpy(slot->mac, mac, sizeof(slot->mac));
+    }
+    slot->rssi = rssi;
+    slot->seen_us = esp_timer_get_time();
+}
 
 LocationMqttClient::LocationMqttClient(RndisBoard& board, std::function<bool()> network_ready)
     : board_(board), position_subscriber_(std::make_unique<PositionSubscriber>(board, std::move(network_ready))) {
@@ -1439,6 +1494,7 @@ bool LocationMqttClient::PublishOnlineReport() {
     AddString(root, "Playback Duration", std::to_string(user_playback_seconds));
     AddString(root, "Conversation Count", std::to_string(user_conversations));
     AddString(root, "Role", role);
+    AddBleBeaconReport(root);
 
     char* payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
