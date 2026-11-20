@@ -30,6 +30,7 @@ static int no_memory_decodes = 0;
 static size_t decoded_width = 300;
 static int decode_calls = 0;
 static std::string cached_imei;
+static std::string configured_imei;
 struct Settings {
     Settings(const char*, bool) {}
     std::string GetString(const char*) const { return cached_imei; }
@@ -168,6 +169,7 @@ using ::TestWrite;
 #define fsync TestFsync
 #define fwrite TestWrite
 #define rename TestRename
+#define JIUCHUAN_STARTUP_QR_IMEI configured_imei
 struct TestBoard {
     std::atomic<bool> startup_pending_{true};
     std::atomic<bool> startup_transport_started_{true}, startup_network_ready_{true};
@@ -201,6 +203,7 @@ struct TestBoard {
 #undef fsync
 #undef fwrite
 #undef rename
+#undef JIUCHUAN_STARTUP_QR_IMEI
 
 static void Write(const fs::path& path, const std::string& data) {
     std::ofstream file(path, std::ios::binary);
@@ -228,6 +231,7 @@ static void Run(const char* name, const std::function<void(TestBoard&)>& test) {
     delays.clear(); on_delay = {}; fail_sync = fail_write = fail_rename = false;
     no_memory_decodes = 0; decoded_width = 300; decode_calls = 0;
     cached_imei.clear();
+    configured_imei.clear();
     TestBoard board;
     test(board);
     fs::current_path(previous);
@@ -272,6 +276,27 @@ int main() {
         b.EnsureTfStartupQr(); Ready(b);
         Check(delays.size() == 1, "IMEI readiness was not awaited");
     });
+    Run("configured IMEI downloads on IP readiness without a live AT identity", [](TestBoard& b) {
+        configured_imei = kImei; b.imei.clear(); b.ready = false; b.pending_waits = 1;
+        on_delay = [&]() {
+            Check(b.network.requests == 0 && b.display.diagnostic == "QR WAIT NETWORK",
+                  "configured IMEI must wait for IP");
+        };
+        b.EnsureTfStartupQr(); Ready(b);
+        Check(b.wait_calls == 2 && b.imei.empty(), "fallback changed the modem identity");
+    });
+    Run("configured IMEI reuses its saved image offline", [](TestBoard& b) {
+        configured_imei = kImei; b.imei.clear(); b.ready = false;
+        Write(kPath, Jpeg());
+        b.EnsureTfStartupQr(); Ready(b, 0);
+        Check(b.network_starts == 0 && b.wait_calls == 0, "saved QR waited for IP");
+    });
+    Run("live modem IMEI takes priority over the configured QR fallback", [](TestBoard& b) {
+        configured_imei = "111111111111111";
+        b.imei.clear(); b.ready = false; b.pending_waits = 1;
+        on_delay = [&]() { b.imei = kImei; };
+        b.EnsureTfStartupQr(); Ready(b);
+    });
     Run("long cellular startup retries without blocking local tasks", [](TestBoard& b) {
         b.ready = false; b.pending_waits = 16;
         b.EnsureTfStartupQr(); Ready(b);
@@ -285,6 +310,7 @@ int main() {
     Run("HTTP failures back off and recover", [](TestBoard& b) {
         b.network.responses.assign(9, Response{});
         for (size_t i = 0; i < 8; ++i) b.network.responses[i].status = 404;
+        on_delay = [&]() { Check(b.display.diagnostic == "QR HTTP 404", "HTTP status missing on screen"); };
         b.EnsureTfStartupQr(); Ready(b, 9);
         Check(delays == std::vector<uint32_t>({2000,4000,8000,16000,32000,60000,60000,60000}), "retry backoff");
     });
@@ -383,6 +409,10 @@ int main() {
             b.EnsureTfStartupQr();
             Check(!b.storage_errors.empty() && b.display.shows == 0, "storage failure ignored");
             Check(!fs::exists(kPartial) && !fs::exists(kPath), "failed download committed");
+            const char* operation = failure == 0 ? "WRITE" : (failure == 1 ? "SYNC" : "SAVE");
+            const int code = failure == 0 ? ENOSPC : EIO;
+            Check(b.display.diagnostic == std::string("QR TF ") + operation + " E" + std::to_string(code),
+                  "TF failure stage or error number was lost");
         });
     }
     std::cout << tests << " TF QR worker scenarios passed\n";

@@ -1193,9 +1193,16 @@ private:
     static constexpr const char* kStartupQrBaseUrl =
         "https://iotossbj.suji.work/SDfile/QR/";
 
+    void ReportQrStorageError(std::string& error, const char* operation, int code) {
+        char diagnostic[40];
+        std::snprintf(diagnostic, sizeof(diagnostic), "QR TF %s E%d", operation, code);
+        error = diagnostic;
+        GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, diagnostic);
+    }
+
     TfQrState LoadStartupQr(const std::string& path,
                            std::unique_ptr<LvglImage>& image,
-                           std::string& error) const {
+                           std::string& error) {
         image.reset();
         error.clear();
         struct stat info = {};
@@ -1204,11 +1211,11 @@ private:
                 error = "QR image is missing";
                 return TfQrState::NeedsDownload;
             }
-            error = "cannot inspect TF QR image: errno=" + std::to_string(errno);
+            ReportQrStorageError(error, "STAT", errno);
             return TfQrState::StorageError;
         }
         if (!S_ISREG(info.st_mode)) {
-            error = "TF QR path is not a regular file: " + path;
+            ReportQrStorageError(error, "PATH", EINVAL);
             return TfQrState::StorageError;
         }
         if (info.st_size < 4 || static_cast<uint64_t>(info.st_size) > kMaxStartupQrBytes) {
@@ -1229,14 +1236,20 @@ private:
         std::unique_ptr<uint8_t, decltype(&heap_caps_free)> jpeg(data, heap_caps_free);
         FILE* file = std::fopen(path.c_str(), "rb");
         if (!file) {
-            error = "cannot open TF QR image: errno=" + std::to_string(errno);
+            ReportQrStorageError(error, "OPEN", errno);
             return TfQrState::StorageError;
         }
+        errno = 0;
         const size_t read = std::fread(data, 1, size, file);
         const bool read_error = std::ferror(file) != 0;
+        const int read_errno = errno;
         const int close_result = std::fclose(file);
-        if (read != size || read_error || close_result != 0) {
-            error = "TF QR image read/close failed";
+        if (read != size || read_error) {
+            ReportQrStorageError(error, "READ", read_errno == 0 ? EIO : read_errno);
+            return TfQrState::StorageError;
+        }
+        if (close_result != 0) {
+            ReportQrStorageError(error, "CLOSE", errno);
             return TfQrState::StorageError;
         }
         if (data[0] != 0xff || data[1] != 0xd8 ||
@@ -1285,24 +1298,34 @@ private:
         auto http = network ? network->CreateHttp(4) : nullptr;
         if (!http) {
             error = "QR HTTP client unavailable";
+            GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR HTTP INIT ERROR");
             return TfDownloadResult::Retry;
         }
         http->SetTimeout(15000);
         ESP_LOGI(BOARD_TAG, "[TF_QR] GET %s -> %s", url.c_str(), path.c_str());
-        if (!http->Open("GET", url) || http->GetStatusCode() != 200) {
-            error = "QR HTTP open/status failed";
+        if (!http->Open("GET", url)) {
+            error = "QR HTTPS connection failed";
+            GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR HTTPS ERROR");
+            http->Close();
+            return TfDownloadResult::Retry;
+        }
+        const int status = http->GetStatusCode();
+        if (status != 200) {
+            error = "QR HTTP " + std::to_string(status);
+            GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, error.c_str());
             http->Close();
             return TfDownloadResult::Retry;
         }
         const size_t expected_size = http->GetBodyLength();
         if (expected_size > kMaxStartupQrBytes) {
             error = "QR HTTP image exceeds size limit";
+            GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR FILE TOO LARGE");
             http->Close();
             return TfDownloadResult::Retry;
         }
         FILE* file = std::fopen(temporary_path.c_str(), "wb");
         if (!file) {
-            error = "cannot open TF QR temporary file: errno=" + std::to_string(errno);
+            ReportQrStorageError(error, "CREATE", errno);
             http->Close();
             return TfDownloadResult::StorageError;
         }
@@ -1314,6 +1337,7 @@ private:
             const int read = http->Read(buffer, sizeof(buffer));
             if (read < 0) {
                 error = "QR HTTP read failed";
+                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR HTTP READ ERROR");
                 result = TfDownloadResult::Retry;
                 break;
             }
@@ -1322,29 +1346,34 @@ private:
             }
             if (written + static_cast<size_t>(read) > kMaxStartupQrBytes) {
                 error = "QR HTTP image exceeds size limit";
+                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR FILE TOO LARGE");
                 result = TfDownloadResult::Retry;
                 break;
             }
+            errno = 0;
             if (std::fwrite(buffer, 1, static_cast<size_t>(read), file) !=
                 static_cast<size_t>(read)) {
-                error = "TF QR write failed";
+                ReportQrStorageError(error, "WRITE", errno == 0 ? EIO : errno);
                 result = TfDownloadResult::StorageError;
                 break;
             }
             written += static_cast<size_t>(read);
         }
-        if (std::fflush(file) != 0 || fsync(fileno(file)) != 0) {
-            error = "TF QR flush/sync failed";
+        if (result == TfDownloadResult::Success &&
+            (std::fflush(file) != 0 || fsync(fileno(file)) != 0)) {
+            ReportQrStorageError(error, "SYNC", errno);
             result = TfDownloadResult::StorageError;
         }
-        if (std::fclose(file) != 0) {
-            error = "TF QR close failed";
+        if (std::fclose(file) != 0 && result == TfDownloadResult::Success) {
+            ReportQrStorageError(error, "CLOSE", errno);
             result = TfDownloadResult::StorageError;
         }
         http->Close();
+        http.reset();
 
         if (result == TfDownloadResult::Success && expected_size > 0 && written != expected_size) {
             error = "QR HTTP size mismatch";
+            GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR HTTP INCOMPLETE");
             result = TfDownloadResult::Retry;
         }
         if (result == TfDownloadResult::Success) {
@@ -1353,6 +1382,7 @@ private:
             while (state == TfQrState::Retry) {
                 // The transfer is complete and synced. Memory pressure must
                 // not discard it and trigger another cellular download.
+                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR MEM RETRY");
                 decode_attempt = std::min(decode_attempt + 1, 6U);
                 const uint32_t delay_ms = std::min(2000U << (decode_attempt - 1), 60000U);
                 ESP_LOGW(BOARD_TAG, "[TF_QR][RETRY] %s; retry staged image in %lu ms",
@@ -1363,6 +1393,9 @@ private:
             if (state != TfQrState::Ready) {
                 result = state == TfQrState::StorageError
                     ? TfDownloadResult::StorageError : TfDownloadResult::Retry;
+                if (result == TfDownloadResult::Retry) {
+                    GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR BAD JPEG");
+                }
             }
         }
         if (result != TfDownloadResult::Success) {
@@ -1373,7 +1406,7 @@ private:
         // Only replace it after a complete download and successful JPEG decode.
         if ((std::remove(path.c_str()) != 0 && errno != ENOENT) ||
             std::rename(temporary_path.c_str(), path.c_str()) != 0) {
-            error = "cannot finalize TF QR image: errno=" + std::to_string(errno);
+            ReportQrStorageError(error, "SAVE", errno);
             std::remove(temporary_path.c_str());
             image.reset();
             return TfDownloadResult::StorageError;
@@ -1398,6 +1431,10 @@ private:
     std::string GetStartupImei() {
         const std::string live = GetImei();
         if (ml307_at::IsImei(live)) return live;
+#ifdef JIUCHUAN_STARTUP_QR_IMEI
+        const std::string configured = JIUCHUAN_STARTUP_QR_IMEI;
+        if (ml307_at::IsImei(configured)) return configured;
+#endif
         // Used only to find a local startup image, never for business identity.
         Settings settings("device", false);
         const std::string saved = settings.GetString("imei");
@@ -1416,6 +1453,11 @@ private:
                     continue;
                 }
                 imei = GetImei();
+#ifdef JIUCHUAN_STARTUP_QR_IMEI
+                // A device-specific build can download its QR while USB AT
+                // recovers. This identity is used only by the QR worker.
+                if (!ml307_at::IsImei(imei)) imei = JIUCHUAN_STARTUP_QR_IMEI;
+#endif
             }
             const bool has_imei = ml307_at::IsImei(imei);
             if (!has_imei && !local_phase) {
@@ -1438,7 +1480,6 @@ private:
                 return;
             }
             if (state == TfQrState::StorageError) {
-                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR TF ERROR");
                 ShowInternalStorageError("QR: " + error);
                 FailStartupQr();
                 return;
@@ -1458,9 +1499,11 @@ private:
                     GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR WAIT NETWORK");
                     if (!WaitForNetworkReady(30000)) {
                         vTaskDelay(pdMS_TO_TICKS(2000));
-                        continue;
                     }
+                    // Recheck the live IMEI once DHCP finishes.
+                    continue;
                 }
+                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR DOWNLOADING");
                 const auto result = DownloadStartupQr(url, path, temporary_path, image, error);
                 if (result == TfDownloadResult::Success) {
                     GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "");
@@ -1468,12 +1511,10 @@ private:
                     return;
                 }
                 if (result == TfDownloadResult::StorageError) {
-                    GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR TF ERROR");
                     ShowInternalStorageError("QR: " + error);
                     FailStartupQr();
                     return;
                 }
-                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR DOWNLOAD RETRY");
             }
             attempt = std::min(attempt + 1, 6U);
             const uint32_t delay_ms = std::min(2000U << (attempt - 1), 60000U);

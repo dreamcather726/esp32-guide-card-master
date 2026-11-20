@@ -750,6 +750,15 @@ target_compile_definitions(${COMPONENT_LIB}
                     PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
                     )
 
+if(CONFIG_BOARD_TYPE_JIUCHUAN AND NOT "${JIUCHUAN_STARTUP_QR_IMEI}" STREQUAL "")
+    string(LENGTH "${JIUCHUAN_STARTUP_QR_IMEI}" qr_imei_length)
+    if(NOT qr_imei_length EQUAL 15 OR NOT JIUCHUAN_STARTUP_QR_IMEI MATCHES "^[0-9]+$")
+        message(FATAL_ERROR "JIUCHUAN_STARTUP_QR_IMEI must contain exactly 15 digits")
+    endif()
+    set_property(SOURCE "boards/jiuchuan-s3/jiuchuan_dev_board.cc" APPEND PROPERTY
+        COMPILE_DEFINITIONS "JIUCHUAN_STARTUP_QR_IMEI=\"${JIUCHUAN_STARTUP_QR_IMEI}\"")
+endif()
+
 # Add generation rules
 add_custom_command(
     OUTPUT ${LANG_HEADER}
