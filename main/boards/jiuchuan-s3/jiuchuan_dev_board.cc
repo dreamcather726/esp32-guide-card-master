@@ -78,11 +78,10 @@ int OnBleBeaconReport(ble_gap_event* event, void*) {
                   static_cast<unsigned>(address[3]), static_cast<unsigned>(address[2]),
                   static_cast<unsigned>(address[1]), static_cast<unsigned>(address[0]));
     if (std::strstr(mac, kBeaconMacFilter) == nullptr) return 0;
-    const char* type = report.addr.type == BLE_ADDR_RANDOM ? "random" : "public";
     if (report.rssi == 127) {
-        ESP_LOGI(kBeaconTag, "MAC=%s type=%s RSSI=unknown", mac, type);
+        ESP_LOGI(kBeaconTag, "MAC=%s RSSI=unknown", mac);
     } else {
-        ESP_LOGI(kBeaconTag, "MAC=%s type=%s RSSI=%d dBm", mac, type, report.rssi);
+        ESP_LOGI(kBeaconTag, "MAC=%s RSSI=%d dBm", mac, report.rssi);
     }
     return 0;
 }
