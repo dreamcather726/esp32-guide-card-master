@@ -2345,7 +2345,8 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
 }
 
 bool Application::CanEnterSleepMode() {
-    if (sd_audio_playing_.load() || sd_audio_pending_.load() ||
+    if (Board::GetInstance().IsStartupPresentationPending() ||
+        sd_audio_playing_.load() || sd_audio_pending_.load() ||
         (initial_group_announcement_requested_.load() &&
          !initial_group_announcement_completed_.load())) {
         return false;

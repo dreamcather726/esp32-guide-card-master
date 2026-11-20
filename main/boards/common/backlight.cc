@@ -3,9 +3,15 @@
 
 #include <esp_log.h>
 #include <driver/ledc.h>
+#include <algorithm>
 
 #define TAG "Backlight"
 
+namespace {
+uint32_t BrightnessToDuty(uint8_t brightness) {
+    return 1023 * brightness / 100;
+}
+}
 
 Backlight::Backlight() {
     // 创建背光渐变定时器
@@ -29,7 +35,7 @@ Backlight::~Backlight() {
     }
 }
 
-void Backlight::RestoreBrightness() {
+uint8_t Backlight::ReadSavedBrightness() {
     // Load brightness from settings
     Settings settings("display");  
     int saved_brightness = settings.GetInt("brightness", 75);
@@ -40,7 +46,11 @@ void Backlight::RestoreBrightness() {
         saved_brightness = 10;  // 设置一个较低的默认值
     }
     
-    SetBrightness(saved_brightness);
+    return static_cast<uint8_t>(std::min(saved_brightness, 100));
+}
+
+void Backlight::RestoreBrightness() {
+    SetBrightness(ReadSavedBrightness());
 }
 
 void Backlight::SetBrightness(uint8_t brightness, bool permanent) {
@@ -48,7 +58,7 @@ void Backlight::SetBrightness(uint8_t brightness, bool permanent) {
         brightness = 100;
     }
 
-    if (brightness_ == brightness) {
+    if (brightness_ == brightness && target_brightness_ == brightness) {
         return;
     }
 
@@ -81,7 +91,11 @@ void Backlight::OnTransitionTimer() {
     }
 }
 
-PwmBacklight::PwmBacklight(gpio_num_t pin, bool output_invert, uint32_t freq_hz) : Backlight() {
+PwmBacklight::PwmBacklight(gpio_num_t pin, bool output_invert, uint32_t freq_hz,
+                           bool start_with_saved_brightness) : Backlight() {
+    if (start_with_saved_brightness) {
+        brightness_ = target_brightness_ = ReadSavedBrightness();
+    }
     const ledc_timer_config_t backlight_timer = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
         .duty_resolution = LEDC_TIMER_10_BIT,
@@ -99,7 +113,7 @@ PwmBacklight::PwmBacklight(gpio_num_t pin, bool output_invert, uint32_t freq_hz)
         .channel = LEDC_CHANNEL_0,
         .intr_type = LEDC_INTR_DISABLE,
         .timer_sel = LEDC_TIMER_0,
-        .duty = 0,
+        .duty = BrightnessToDuty(brightness_),
         .hpoint = 0,
         .flags = {
             .output_invert = output_invert,
@@ -114,8 +128,7 @@ PwmBacklight::~PwmBacklight() {
 
 void PwmBacklight::SetBrightnessImpl(uint8_t brightness) {
     // LEDC resolution set to 10bits, thus: 100% = 1023
-    uint32_t duty_cycle = (1023 * brightness) / 100;
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty_cycle);
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, BrightnessToDuty(brightness));
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
 }
 

@@ -836,12 +836,11 @@ private:
             DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y,
             DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
 
-        GetBacklight()->RestoreBrightness();
+        auto* backlight = GetBacklight();
         ESP_LOGI(BOARD_TAG,
-                 "ST7789 display initialized: %dx%d, brightness_current=%u, BL_level=%d",
+                 "[LCD_BOOT] ST7789 display initialized: %dx%d, PWM brightness=%u%%",
                  DISPLAY_WIDTH, DISPLAY_HEIGHT,
-                 static_cast<unsigned>(GetBacklight()->brightness()),
-                 gpio_get_level(DISPLAY_BACKLIGHT_PIN));
+                 static_cast<unsigned>(backlight->brightness()));
     }
 
     void InitializeSdCard() {
@@ -1606,6 +1605,7 @@ public:
         static_cast<NoEmojiSpiLcdDisplay*>(display_)->BeginStartupPresentation([this]() {
             Application::GetInstance().Schedule([this]() { CompleteStartupPresentation(); });
         });
+        ESP_LOGI(BOARD_TAG, "[LCD_BOOT] Startup logo prepared");
         InitializePowerSaveTimer();
         InitializeButtons();
         InitializeHallSensor();
@@ -1646,7 +1646,7 @@ public:
 
     Backlight* GetBacklight() override {
         static PwmBacklight backlight(
-            DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
+            DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT, 25000, true);
         return &backlight;
     }
 

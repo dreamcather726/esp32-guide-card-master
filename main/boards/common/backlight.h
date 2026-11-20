@@ -17,6 +17,7 @@ public:
     inline uint8_t brightness() const { return brightness_; }
 
 protected:
+    static uint8_t ReadSavedBrightness();
     void OnTransitionTimer();
     virtual void SetBrightnessImpl(uint8_t brightness) = 0;
 
@@ -29,7 +30,8 @@ protected:
 
 class PwmBacklight : public Backlight {
 public:
-    PwmBacklight(gpio_num_t pin, bool output_invert = false, uint32_t freq_hz = 25000);
+    PwmBacklight(gpio_num_t pin, bool output_invert = false, uint32_t freq_hz = 25000,
+                 bool start_with_saved_brightness = false);
     ~PwmBacklight();
 
     void SetBrightnessImpl(uint8_t brightness) override;
