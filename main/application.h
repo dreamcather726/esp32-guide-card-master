@@ -168,7 +168,10 @@ private:
     bool CanStartPersonalChat();
     void VerifyUserBinding();
     void ScheduleAudioChannelTask(std::function<void()>&& callback);
+    void ScheduleIncomingAudio(std::unique_ptr<AudioStreamPacket> packet);
+    void StartTtsPlayback();
     std::atomic<uint32_t> audio_channel_epoch_{0};
+    std::atomic<size_t> scheduled_audio_packets_{0};
     std::atomic<bool> firmware_upgrade_in_progress_{false};
     struct SdAudioSequenceState {
         bool success = true;
@@ -203,7 +206,10 @@ private:
     AudioService audio_service_;
     std::unique_ptr<Ota> ota_;
 
-    bool has_server_time_ = false;
+#ifdef CONFIG_BOARD_TYPE_JIUCHUAN
+    int guide_timezone_minutes_ = kGuideDefaultTimezoneMinutes;
+    bool sntp_running_ = false;
+#endif
     bool aborted_ = false;
     bool assets_version_checked_ = false;
     bool startup_network_connected_pending_ = false;

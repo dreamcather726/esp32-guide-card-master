@@ -21,6 +21,9 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_app_desc.h>
+#ifdef CONFIG_BOARD_TYPE_JIUCHUAN
+#include <esp_netif_sntp.h>
+#endif
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
@@ -444,7 +447,7 @@ void Application::UpdateGuideDisplay() {
     input.playback = active_guide_playback_;
     input.role_name = GetCurrentRoleName();
     input.speech_text = guide_speech_text_;
-    input.clock = GuideClock(std::time(nullptr));
+    input.clock = GuideClock(std::time(nullptr), guide_timezone_minutes_);
     const auto binding = board.GetUserBinding();
     if (!board.RequiresUserBinding()) input.binding = GuideBinding::NotRequired;
     else if (!binding.IsBound()) input.binding = GuideBinding::Unbound;
@@ -456,6 +459,16 @@ void Application::UpdateGuideDisplay() {
 }
 
 void Application::HandleNetworkConnectedEvent() {
+#ifdef CONFIG_BOARD_TYPE_JIUCHUAN
+    if (!sntp_running_) {
+        esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
+        config.wait_for_sync = false;
+        config.sync_cb = [](timeval*) { ESP_LOGI(TAG, "Clock synchronized through SNTP"); };
+        const esp_err_t result = esp_netif_sntp_init(&config);
+        sntp_running_ = result == ESP_OK;
+        if (!sntp_running_) ESP_LOGW(TAG, "SNTP initialization failed: %s", esp_err_to_name(result));
+    }
+#endif
     if (Board::GetInstance().IsStartupPresentationPending()) {
         startup_network_connected_pending_ = true;
         ESP_LOGI(TAG, "Network ready; deferring business initialization until startup screen ends");
@@ -494,6 +507,12 @@ void Application::HandleNetworkConnectedEvent() {
 
 void Application::HandleNetworkDisconnectedEvent() {
     startup_network_connected_pending_ = false;
+#ifdef CONFIG_BOARD_TYPE_JIUCHUAN
+    if (sntp_running_) {
+        esp_netif_sntp_deinit();
+        sntp_running_ = false;
+    }
+#endif
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
     if (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking) {
@@ -519,7 +538,9 @@ void Application::HandleActivationDoneEvent() {
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
 
-    has_server_time_ = ota_->HasServerTime();
+#ifdef CONFIG_BOARD_TYPE_JIUCHUAN
+    if (ota_->HasServerTime()) guide_timezone_minutes_ = ota_->GetServerTimezoneMinutes();
+#endif
 
     auto display = Board::GetInstance().GetDisplay();
 #ifndef CONFIG_BOARD_TYPE_JIUCHUAN
@@ -843,9 +864,7 @@ void Application::InitializeProtocol() {
     });
 
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (GetDeviceState() == kDeviceStateSpeaking) {
-            audio_service_.PushPacketToDecodeQueue(std::move(packet));
-        }
+        ScheduleIncomingAudio(std::move(packet));
     });
 
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
@@ -884,15 +903,7 @@ void Application::InitializeProtocol() {
                 return;
             }
             if (strcmp(state->valuestring, "start") == 0) {
-                ScheduleAudioChannelTask([this]() {
-                    const DeviceState previous_state = GetDeviceState();
-                    if (!tts_stop_pending_)
-                        return_idle_after_current_tts_ = previous_state == kDeviceStateIdle;
-                    tts_stop_pending_ = false;
-                    aborted_ = false;
-                    guide_speech_text_.clear();
-                    SetDeviceState(kDeviceStateSpeaking);
-                });
+                ScheduleAudioChannelTask([this]() { StartTtsPlayback(); });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 ScheduleAudioChannelTask([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
@@ -1148,8 +1159,9 @@ void Application::ScheduleDeferredOtaCheck() {
                 deferred_ota.MarkCurrentVersionValid();
                 app->deferred_ota_check_needed_ = false;
                 const bool has_time = deferred_ota.HasServerTime();
-                app->Schedule([app, has_time]() {
-                    if (has_time) app->has_server_time_ = true;
+                const int timezone_minutes = deferred_ota.GetServerTimezoneMinutes();
+                app->Schedule([app, has_time, timezone_minutes]() {
+                    if (has_time) app->guide_timezone_minutes_ = timezone_minutes;
                     app->VerifyUserBinding();
                 });
                 if (deferred_ota.HasNewVersion()) {
@@ -2202,7 +2214,6 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
-            audio_service_.ResetDecoder();
             break;
         case kDeviceStateWifiConfiguring:
             audio_service_.EnableVoiceProcessing(false);
@@ -2419,6 +2430,33 @@ void Application::ScheduleAudioChannelTask(std::function<void()>&& callback) {
         if (epoch == audio_channel_epoch_.load() && protocol_ &&
             protocol_->IsAudioChannelOpened()) callback();
     });
+}
+
+void Application::ScheduleIncomingAudio(std::unique_ptr<AudioStreamPacket> packet) {
+    // Use the same task queue as TTS start/stop so frames are decoded in order.
+    if (scheduled_audio_packets_.fetch_add(1) >= MAX_DECODE_PACKETS_IN_QUEUE) {
+        --scheduled_audio_packets_;
+        return;
+    }
+    const uint32_t epoch = audio_channel_epoch_.load();
+    Schedule([this, epoch, frame = std::move(*packet)]() mutable {
+        --scheduled_audio_packets_;
+        if (epoch == audio_channel_epoch_.load() && protocol_ && protocol_->IsAudioChannelOpened() &&
+            GetDeviceState() == kDeviceStateSpeaking && !aborted_) {
+            audio_service_.PushPacketToDecodeQueue(std::make_unique<AudioStreamPacket>(std::move(frame)));
+        }
+    });
+}
+
+void Application::StartTtsPlayback() {
+    const DeviceState previous_state = GetDeviceState();
+    if (!tts_stop_pending_) return_idle_after_current_tts_ = previous_state == kDeviceStateIdle;
+    tts_stop_pending_ = false;
+    aborted_ = false;
+    guide_speech_text_.clear();
+    if (previous_state != kDeviceStateSpeaking && SetDeviceState(kDeviceStateSpeaking)) {
+        audio_service_.ResetDecoder();
+    }
 }
 
 void Application::VerifyUserBinding() {

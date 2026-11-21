@@ -11,6 +11,7 @@ sections = [
     ("void Application::PlaySdAudioSequence(", "void Application::InterruptCurrentPlayback()"),
     ("void Application::CancelSdAudioPlaybackOnMainTask()", "uint64_t Application::GetSdAudioPlaybackDurationSeconds()"),
     ("void Application::StartNextSdAudioPlayback()", "void Application::HandleToggleChatEvent()"),
+    ("void Application::ScheduleAudioChannelTask(", "void Application::VerifyUserBinding()"),
 ]
 with tempfile.TemporaryDirectory(prefix="jiuchuan-guide-runtime-") as folder:
     temp = Path(folder)

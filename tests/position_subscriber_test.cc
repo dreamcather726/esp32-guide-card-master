@@ -210,7 +210,10 @@ LocationMqttClient::LocationMqttClient(RndisBoard& board, std::function<bool()> 
     : board_(board), position_subscriber_(std::make_unique<PositionSubscriber>(board, std::move(ready))) {}
 LocationMqttClient::~LocationMqttClient() { Stop(); }
 bool LocationMqttClient::FetchCredentials(const std::string&, Credentials&) {
-    ++credential_requests; last_credentials_http_status_ = 403; return false;
+    ++credential_requests;
+    last_credentials_http_status_ = 403;
+    SetScreenDiagnostic("BIZ MQTT HTTP 403");
+    return false;
 }
 bool LocationMqttClient::StartMqtt(const Credentials&, const std::string&, const std::string&) { assert(false); return false; }
 void LocationMqttClient::StopMqtt() {}
@@ -342,6 +345,9 @@ int main() {
         ErrorData error; error.error_type = 2; error.connect_return_code = 4;
         event.error_handle = &error; subscriber.HandleEvent(MQTT_EVENT_ERROR, &event);
         assert(board.display.position_diagnostic == "POS MQTT CONNACK 4");
+        error.error_type = 0; error.esp_transport_sock_errno = 110;
+        subscriber.HandleEvent(MQTT_EVENT_ERROR, &event);
+        assert(board.display.position_diagnostic == "POS MQTT SOCK 110");
         event.error_handle = nullptr; subscriber.HandleEvent(MQTT_EVENT_ERROR, &event);
         assert(logs.find("[LOGIN] broker=mqtt://example.test:1883") != std::string::npos);
         assert(logs.find("[CONNECTED]") != std::string::npos && logs.find("[SUBSCRIBED]") != std::string::npos);
@@ -366,6 +372,9 @@ int main() {
         assert(starts == original_starts + 2 && subscriber.client_);
         board.ready = false; subscriber.Poll();
         assert(!subscriber.client_);
+        assert(board.display.position_diagnostic == "POS MQTT WAIT NET");
+        board.ready = true; subscriber.Poll();
+        assert(starts == original_starts + 3 && subscriber.client_);
     }
     std::cout << "PASS task-start failure retains five-second retry and network loss cleans up the recovered client\n";
     {
@@ -399,4 +408,20 @@ int main() {
         internal_budget = -1;
     }
     std::cout << "PASS real shared manager Start/Run/WaitOrStop: one management task, 6KB stack saving, bounded stack-budget recovery, 403-independent positioning and cleanup\n";
+    {
+        RndisBoard board;
+        LocationMqttClient manager(board, []() { return true; });
+        const int original_requests = credential_requests;
+        int ticks = 0;
+        on_delay = [&]() {
+            ++ticks;
+            if (ticks == 1) board.ready = false;
+            if (ticks == 2) board.ready = true;
+            if (ticks == 3) manager.stop_requested_ = true;
+        };
+        manager.Run();
+        on_delay = {};
+        assert(credential_requests == original_requests + 2);
+    }
+    std::cout << "PASS business MQTT retries immediately after a 4G outage during credential backoff\n";
 }

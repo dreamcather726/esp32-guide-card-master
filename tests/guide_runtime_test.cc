@@ -22,6 +22,7 @@ template<class... Args> void Log(Args&&...) {}
 #define TAG "test"
 static constexpr const char* kSdCardMountPoint = "sd";
 static constexpr size_t kMaxSdAudioQueueSize = 32;
+static constexpr size_t MAX_DECODE_PACKETS_IN_QUEUE = 2;
 using BaseType_t = int;
 static constexpr int pdPASS = 1, kAbortReasonNone = 0;
 enum ListeningMode { kListeningModeAutoStop, kListeningModeManualStop };
@@ -60,17 +61,24 @@ struct Board {
     UserBindingSnapshot GetUserBinding() { return binding; }
     void SetPowerSaveLevel(PowerSaveLevel) {}
 };
+struct AudioStreamPacket { int sequence; };
 struct FakeAudio {
     bool idle = true, success = true;
     uint32_t generation = 0;
+    std::vector<int> frames;
+    int decoder_resets = 0;
     bool IsIdle() { return idle; }
-    void ResetDecoder() {}
+    void ResetDecoder() { ++decoder_resets; frames.clear(); }
+    void PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> frame) { frames.push_back(frame->sequence); }
     void CancelFilePlayback() { ++generation; }
     uint32_t GetFilePlaybackGeneration() { return generation; }
     bool PlayFile(const std::string&) { return success; }
     void WaitForPlaybackIdle() {}
 };
-struct FakeProtocol { void SendStopListening() {} };
+struct FakeProtocol {
+    void SendStopListening() {}
+    bool IsAudioChannelOpened() const { return true; }
+};
 class Application {
 public:
 #include "queue_types.inc"
@@ -85,6 +93,9 @@ public:
     std::deque<std::function<void()>> tasks;
     FakeAudio audio_service_;
     std::unique_ptr<FakeProtocol> protocol_ = std::make_unique<FakeProtocol>();
+    std::atomic<uint32_t> audio_channel_epoch_{0};
+    std::atomic<size_t> scheduled_audio_packets_{0};
+    int guide_timezone_minutes_ = kGuideDefaultTimezoneMinutes;
     bool tts_stop_pending_ = false, aborted_ = false, return_idle_after_current_tts_ = false;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     DeviceState GetDeviceState() { return state; }
@@ -101,6 +112,9 @@ public:
     void StartNextSdAudioPlayback();
     void UpdateGuideDisplay();
     void FinishTtsWhenIdle();
+    void ScheduleAudioChannelTask(std::function<void()>&& callback);
+    void ScheduleIncomingAudio(std::unique_ptr<AudioStreamPacket> packet);
+    void StartTtsPlayback();
     void Drain() {
         while (!tasks.empty()) { auto fn = std::move(tasks.front()); tasks.pop_front(); fn(); }
         FinishTtsWhenIdle(); UpdateGuideDisplay();
@@ -158,5 +172,20 @@ int main() {
     assert(board.display.view.page == GuidePage::Listening);
     app.state = kDeviceStateSpeaking; app.tts_stop_pending_ = true; app.return_idle_after_current_tts_ = true;
     app.Drain(); assert(board.display.view.page == GuidePage::Idle);
+    const int decoder_resets = app.audio_service_.decoder_resets;
+    app.audio_service_.frames = {-1};
+    app.ScheduleAudioChannelTask([&]() { app.StartTtsPlayback(); });
+    app.ScheduleIncomingAudio(std::make_unique<AudioStreamPacket>(AudioStreamPacket{1}));
+    app.ScheduleIncomingAudio(std::make_unique<AudioStreamPacket>(AudioStreamPacket{2}));
+    app.ScheduleIncomingAudio(std::make_unique<AudioStreamPacket>(AudioStreamPacket{3}));
+    app.Drain();
+    assert(app.state == kDeviceStateSpeaking && app.audio_service_.decoder_resets == decoder_resets + 1);
+    assert((app.audio_service_.frames == std::vector<int>{1, 2}));
+    app.ScheduleIncomingAudio(std::make_unique<AudioStreamPacket>(AudioStreamPacket{4}));
+    ++app.audio_channel_epoch_;
+    app.Drain();
+    assert((app.audio_service_.frames == std::vector<int>{1, 2}));
+    assert(app.scheduled_audio_packets_ == 0);
+    std::cout << "PASS TTS start runs before early frames, with a bounded queue and stale-channel rejection\n";
     std::cout << "PASS production Application SD queue, three-part playback, cancellation, missing files, task failure, verified binding hints and TTS speaker drain\n";
 }

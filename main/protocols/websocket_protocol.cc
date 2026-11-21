@@ -224,16 +224,24 @@ bool WebsocketProtocol::OpenAudioChannel() {
         last_incoming_time_ = std::chrono::steady_clock::now();
     });
 
-    websocket_->OnDisconnected([this, generation]() {
+    websocket_->OnDisconnected([this, generation, display]() {
         std::lock_guard<std::mutex> lock(context_mutex_);
         if (generation != channel_generation_.load()) return;
-        channel_ready_ = false;
+        const bool was_ready = channel_ready_.exchange(false);
         context_failed_ = true;
         xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_CONTEXT_ERROR_EVENT);
         if (binding_required_ && Board::GetInstance().GetUserBinding().state != BindingState::Error) {
             Board::GetInstance().SetUserBindingState(channel_binding_, BindingState::Pending);
         }
         ESP_LOGI(TAG, "Websocket disconnected");
+        if (was_ready) {
+            const DeviceState state = Application::GetInstance().GetDeviceState();
+            if (state == kDeviceStateListening || state == kDeviceStateSpeaking) {
+                display->SetDiagnostic(DiagnosticChannel::VoiceLink, "LINK WS DISCONNECTED");
+            } else {
+                display->SetDiagnosticStatus(DiagnosticChannel::VoiceLink, "LINK WS CLOSED");
+            }
+        }
         if (on_audio_channel_closed_ != nullptr) {
             on_audio_channel_closed_();
         }

@@ -84,7 +84,8 @@ private:
 
     void Run();
     void SetScreenDiagnostic(const char* message, bool fault = true);
-    bool WaitOrStop(uint32_t delay_ms);
+    bool IsNetworkAvailable() const;
+    bool WaitOrStop(uint32_t delay_ms, bool interrupt_on_network_loss = false);
     bool FetchCredentials(const std::string& cab_guid,
                           Credentials& credentials);
     bool StartMqtt(const Credentials& credentials,

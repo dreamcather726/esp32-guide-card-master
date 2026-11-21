@@ -1,4 +1,5 @@
 #include "ota.h"
+#include "display/guide_state.h"
 #include "ota_flash_sink.h"
 #include "ota_response.h"
 #include "system_info.h"
@@ -231,20 +232,24 @@ esp_err_t Ota::CheckVersion() {
         cJSON *timestamp = cJSON_GetObjectItem(server_time, "timestamp");
         cJSON *timezone_offset = cJSON_GetObjectItem(server_time, "timezone_offset");
 
-        if (cJSON_IsNumber(timestamp)) {
-            // 设置系统时间
-            struct timeval tv;
-            double ts = timestamp->valuedouble;
-
-            // 如果有时区偏移，计算本地时间
-            if (cJSON_IsNumber(timezone_offset)) {
-                ts += (timezone_offset->valueint * 60 * 1000); // 转换分钟为毫秒
-            }
-
-            tv.tv_sec = (time_t)(ts / 1000);  // 转换毫秒为秒
-            tv.tv_usec = (suseconds_t)((long long)ts % 1000) * 1000;  // 剩余的毫秒转换为微秒
-            settimeofday(&tv, NULL);
-            has_server_time_ = true;
+        if (cJSON_IsNumber(timestamp) && timestamp->valuedouble >= 1704067200000.0 &&
+            timestamp->valuedouble < 4102444800000.0) {
+            int64_t timestamp_ms = static_cast<int64_t>(timestamp->valuedouble);
+            const bool valid_offset = cJSON_IsNumber(timezone_offset) &&
+                timezone_offset->valueint >= -12 * 60 && timezone_offset->valueint <= 14 * 60;
+#ifdef CONFIG_BOARD_TYPE_JIUCHUAN
+            // Keep the system clock in UTC for both OTA and SNTP.
+            server_timezone_minutes_ = valid_offset ? timezone_offset->valueint : kGuideDefaultTimezoneMinutes;
+#else
+            if (valid_offset) timestamp_ms += int64_t(timezone_offset->valueint) * 60000;
+#endif
+            const timeval tv = {
+                .tv_sec = static_cast<time_t>(timestamp_ms / 1000),
+                .tv_usec = static_cast<suseconds_t>((timestamp_ms % 1000) * 1000),
+            };
+            has_server_time_ = settimeofday(&tv, nullptr) == 0;
+        } else {
+            ESP_LOGW(TAG, "Ignoring invalid OTA clock timestamp");
         }
     } else {
         ESP_LOGW(TAG, "No server_time section found!");

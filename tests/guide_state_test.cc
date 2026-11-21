@@ -56,9 +56,10 @@ int main() {
         input.state = state;
         assert(ResolveGuideView(input).page == GuidePage::Legacy);
     }
-    assert(GuideClock(0) == "--:--");
-    assert(GuideClock(1704098580) == "08:43");
-    assert(GuideClock(1704153540) == "23:59");
-    assert(GuideClock(1704153600) == "00:00");
+    assert(GuideClock(0, kGuideDefaultTimezoneMinutes) == "--:--");
+    assert(GuideClock(1704069780, kGuideDefaultTimezoneMinutes) == "08:43");
+    assert(GuideClock(1704124740, kGuideDefaultTimezoneMinutes) == "23:59");
+    assert(GuideClock(1704124800, kGuideDefaultTimezoneMinutes) == "00:00");
+    assert(GuideClock(1704069780, -60) == "23:43");
     std::cout << "PASS guide startup priority, clock validity/rollover, binding lifecycle, SD safety/narration, listening/TTS and idle recovery\n";
 }

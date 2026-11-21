@@ -799,10 +799,14 @@ static void ConfigureRndisDns(esp_netif_t* netif) {
         ESP_LOGI(TAG, "USB RNDIS DHCP DNS: " IPSTR, IP2STR(&dhcp_dns.ip.u_addr.ip4));
     } else {
         ESP_LOGW(TAG, "USB RNDIS DHCP did not provide a usable DNS server");
+        SetRndisDnsServer(netif, ESP_NETIF_DNS_MAIN, kPrimaryDnsServer, "primary fallback");
     }
 
-    SetRndisDnsServer(netif, ESP_NETIF_DNS_MAIN, kPrimaryDnsServer, "primary");
-    SetRndisDnsServer(netif, ESP_NETIF_DNS_BACKUP, kBackupDnsServer, "backup");
+    esp_netif_dns_info_t backup_dns = {};
+    if (esp_netif_get_dns_info(netif, ESP_NETIF_DNS_BACKUP, &backup_dns) != ESP_OK ||
+        backup_dns.ip.type != IPADDR_TYPE_V4 || backup_dns.ip.u_addr.ip4.addr == 0) {
+        SetRndisDnsServer(netif, ESP_NETIF_DNS_BACKUP, kBackupDnsServer, "secondary fallback");
+    }
 }
 
 

@@ -98,7 +98,8 @@ void PositionSubscriber::Poll() {
     if (!ready || !ml307_at::IsImei(imei)) {
         if (client_) {
             StopClient();
-            SetScreenDiagnostic(ready ? "POS MQTT WAIT IMEI" : "POS MQTT OFFLINE");
+            next_start_ = 0;
+            SetScreenDiagnostic(ready ? "POS MQTT WAIT IMEI" : "POS MQTT WAIT NET", false);
         }
     } else {
         if (!configured) SetScreenDiagnostic("POS MQTT NO CONFIG");
@@ -164,18 +165,21 @@ void PositionSubscriber::HandleEvent(int32_t id, esp_mqtt_event_handle_t event) 
         mqtt_connected_ = false;
         ClearPosition();
         char diagnostic[40] = "POS MQTT LINK ERROR";
-        if (event->error_handle && event->error_handle->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
-            std::snprintf(diagnostic, sizeof(diagnostic), "POS MQTT CONNACK %d",
-                          int(event->error_handle->connect_return_code));
-        } else if (event->error_handle && event->error_handle->error_type == MQTT_ERROR_TYPE_SUBSCRIBE_FAILED) {
-            std::snprintf(diagnostic, sizeof(diagnostic), "POS MQTT SUB ERROR");
-        }
-        SetScreenDiagnostic(diagnostic);
         if (event->error_handle) {
             const auto* error = event->error_handle;
+            if (error->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
+                std::snprintf(diagnostic, sizeof(diagnostic), "POS MQTT CONNACK %d", int(error->connect_return_code));
+            } else if (error->error_type == MQTT_ERROR_TYPE_SUBSCRIBE_FAILED) {
+                std::snprintf(diagnostic, sizeof(diagnostic), "POS MQTT SUB ERROR");
+            } else if (error->esp_transport_sock_errno != 0) {
+                std::snprintf(diagnostic, sizeof(diagnostic), "POS MQTT SOCK %d", error->esp_transport_sock_errno);
+            } else if (error->esp_tls_last_esp_err != 0) {
+                std::snprintf(diagnostic, sizeof(diagnostic), "POS MQTT NET %X", static_cast<unsigned>(error->esp_tls_last_esp_err));
+            }
             ESP_LOGE(kTag, "[ERROR] broker=%s type=%d connack=%d tls_esp=0x%x tls_stack=%d socket_errno=%d",
                      JIUCHUAN_POSITION_MQTT_URI, int(error->error_type), int(error->connect_return_code),
                      int(error->esp_tls_last_esp_err), error->esp_tls_stack_err, error->esp_transport_sock_errno);
         } else ESP_LOGE(kTag, "[ERROR] broker=%s (no error detail)", JIUCHUAN_POSITION_MQTT_URI);
+        SetScreenDiagnostic(diagnostic);
     }
 }

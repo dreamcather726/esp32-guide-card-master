@@ -38,10 +38,11 @@ struct GuideInput {
     std::string clock = "--:--";
 };
 
-// The OTA service already applies its timezone offset before settimeofday.
-// Format that clock directly; never add a second UTC+8 offset or show boot time.
-inline std::string GuideClock(std::time_t now) {
+inline constexpr int kGuideDefaultTimezoneMinutes = 8 * 60;
+
+inline std::string GuideClock(std::time_t now, int timezone_minutes) {
     if (now < 1704067200) return "--:--";
+    now += timezone_minutes * 60;
     std::tm local{};
     if (!gmtime_r(&now, &local)) return "--:--";
     char text[6];

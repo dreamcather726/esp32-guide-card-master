@@ -410,12 +410,17 @@ void LocationMqttClient::TaskEntry(void* arg) {
     vTaskDelete(nullptr);
 }
 
-bool LocationMqttClient::WaitOrStop(uint32_t delay_ms) {
+bool LocationMqttClient::IsNetworkAvailable() const {
+    return !board_.IsCellularNetwork() || board_.IsNetworkReady();
+}
+
+bool LocationMqttClient::WaitOrStop(uint32_t delay_ms, bool interrupt_on_network_loss) {
     const int64_t deadline = esp_timer_get_time() + int64_t(delay_ms) * 1000;
     while (!stop_requested_) {
         // Keep the independent position connection/CSQ alive even during
         // long credential retries, without a second 6144-byte worker stack.
         position_subscriber_->Poll();
+        if (interrupt_on_network_loss && !IsNetworkAvailable()) break;
         const int64_t remaining_ms = (deadline - esp_timer_get_time()) / 1000;
         if (remaining_ms <= 0) break;
         if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(std::min<int64_t>(remaining_ms, 1000)))) break;
@@ -427,7 +432,9 @@ void LocationMqttClient::Run() {
     uint32_t credential_failures = 0;
     while (!stop_requested_) {
         position_subscriber_->Poll();
-        if (board_.IsCellularNetwork() && !board_.IsNetworkReady()) {
+        if (!IsNetworkAvailable()) {
+            credential_failures = 0;
+            SetScreenDiagnostic("BIZ MQTT WAIT NET", false);
             if (WaitOrStop(1000)) break;
             continue;
         }
@@ -445,12 +452,6 @@ void LocationMqttClient::Run() {
 
         Credentials credentials;
         if (!FetchCredentials(cab_guid, credentials)) {
-            char diagnostic[40] = "BIZ MQTT CRED ERROR";
-            if (last_credentials_http_status_ >= 300) {
-                std::snprintf(diagnostic, sizeof(diagnostic), "BIZ MQTT HTTP %d",
-                              last_credentials_http_status_);
-            }
-            SetScreenDiagnostic(diagnostic);
             credential_failures = std::min<uint32_t>(credential_failures + 1, 8);
             const uint32_t retry_delay =
                 (last_credentials_http_status_ == 401 ||
@@ -461,7 +462,7 @@ void LocationMqttClient::Run() {
             ESP_LOGW(kTag,
                      "credentials unavailable (HTTP %d); retrying in %u ms",
                      last_credentials_http_status_, retry_delay);
-            if (WaitOrStop(retry_delay)) {
+            if (WaitOrStop(retry_delay, true)) {
                 break;
             }
             continue;
@@ -476,7 +477,7 @@ void LocationMqttClient::Run() {
         }
 
         uint32_t waited_ms = 0;
-        while (!stop_requested_ && !connected_ && waited_ms < kConnectWaitMs) {
+        while (!stop_requested_ && !connected_ && IsNetworkAvailable() && waited_ms < kConnectWaitMs) {
             if (WaitOrStop(1000)) {
                 break;
             }
@@ -484,6 +485,10 @@ void LocationMqttClient::Run() {
         }
         if (stop_requested_) {
             break;
+        }
+        if (!IsNetworkAvailable()) {
+            StopMqtt();
+            continue;
         }
         if (!connected_) {
             if (!connect_error_reported_) SetScreenDiagnostic("BIZ MQTT LOGIN TIMEOUT");
@@ -520,6 +525,7 @@ void LocationMqttClient::Run() {
             if (WaitOrStop(1000)) {
                 break;
             }
+            if (!IsNetworkAvailable()) break;
             if (!connected_) {
                 disconnected_ms += 1000;
                 if (disconnected_ms >= kReconnectGraceMs) {
@@ -554,12 +560,14 @@ bool LocationMqttClient::FetchCredentials(const std::string& cab_guid,
     last_credentials_http_status_ = 0;
     auto* network = board_.GetNetwork();
     if (!network) {
+        SetScreenDiagnostic("BIZ CRED NO NETWORK");
         ESP_LOGE(kTag, "network interface is unavailable");
         return false;
     }
 
     auto http = network->CreateHttp(2);
     if (!http) {
+        SetScreenDiagnostic("BIZ CRED NO CLIENT");
         ESP_LOGE(kTag, "failed to create credentials HTTP client");
         return false;
     }
@@ -572,22 +580,34 @@ bool LocationMqttClient::FetchCredentials(const std::string& cab_guid,
     ESP_LOGI(kTag, "POST temporary credentials for cabGuid %s",
              cab_guid.c_str());
     if (!http->Open("POST", kCredentialsUrl)) {
-        ESP_LOGE(kTag, "credentials HTTP open failed, error=0x%x",
-                 http->GetLastError());
+        const auto error = static_cast<unsigned>(http->GetLastError());
+        char diagnostic[40];
+        std::snprintf(diagnostic, sizeof(diagnostic), "BIZ CRED OPEN %X", error);
+        SetScreenDiagnostic(diagnostic);
+        ESP_LOGE(kTag, "credentials HTTP open failed, error=0x%x", error);
         return false;
     }
 
     const int status = http->GetStatusCode();
     last_credentials_http_status_ = status;
+    if (status <= 0) {
+        http->Close();
+        SetScreenDiagnostic("BIZ CRED NO HTTP");
+        return false;
+    }
     std::string body;
     char response_chunk[256];
+    int count = 0;
     while (body.size() < 8192) {
-        const int count = http->Read(response_chunk, std::min(sizeof(response_chunk), 8192 - body.size()));
+        count = http->Read(response_chunk, std::min(sizeof(response_chunk), 8192 - body.size()));
         if (count <= 0) break;
         body.append(response_chunk, count);
     }
     http->Close();
     if (status != 200) {
+        char diagnostic[40];
+        std::snprintf(diagnostic, sizeof(diagnostic), "BIZ MQTT HTTP %d", status);
+        SetScreenDiagnostic(diagnostic);
         std::string reason;
         cJSON* error_root = cJSON_ParseWithLength(body.data(), body.size());
         if (error_root) {
@@ -612,9 +632,14 @@ bool LocationMqttClient::FetchCredentials(const std::string& cab_guid,
         }
         return false;
     }
+    if (count < 0) {
+        SetScreenDiagnostic("BIZ CRED READ ERROR");
+        return false;
+    }
 
     cJSON* root = cJSON_ParseWithLength(body.data(), body.size());
     if (!root) {
+        SetScreenDiagnostic("BIZ CRED INVALID JSON");
         ESP_LOGE(kTag, "credentials API returned invalid JSON");
         return false;
     }
@@ -638,6 +663,7 @@ bool LocationMqttClient::FetchCredentials(const std::string& cab_guid,
         credentials.client_id != cab_guid || credentials.username.empty() ||
         credentials.password.empty() ||
         credentials.wss_url.rfind("wss://", 0) != 0) {
+        SetScreenDiagnostic("BIZ CRED INVALID FIELDS");
         ESP_LOGE(kTag,
                  "credentials validation failed: success=%d imei_match=%d client_match=%d user=%d password=%d wss=%d",
                  success, response_imei == cab_guid,
