@@ -10,6 +10,8 @@
 #include <cstdio>
 #include <cJSON.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
+#include <esp_tls_errors.h>
 #include <arpa/inet.h>
 #include "assets/lang_config.h"
 
@@ -239,9 +241,16 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
     if (!websocket_->Connect(url.c_str())) {
-        ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", websocket_->GetLastError());
+        const int error = websocket_->GetLastError();
+        ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d, internal_largest=%u, psram_largest=%u",
+                 error, static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
         char diagnostic[40];
-        std::snprintf(diagnostic, sizeof(diagnostic), "LINK WS ERR %d", websocket_->GetLastError());
+        if (error == ESP_ERR_MBEDTLS_SSL_SETUP_FAILED) {
+            std::snprintf(diagnostic, sizeof(diagnostic), "LINK TLS SETUP %04X", static_cast<unsigned>(error));
+        } else {
+            std::snprintf(diagnostic, sizeof(diagnostic), "LINK WS ERR %d", error);
+        }
         display->SetDiagnostic(DiagnosticChannel::VoiceLink, diagnostic);
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         CloseAudioChannel();

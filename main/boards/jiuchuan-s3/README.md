@@ -13,6 +13,7 @@
 | --- | --- |
 | `PTT DOWN` / `PTT HELD` | 检测到按键 / 已触发长按。 |
 | `LINK MQTT NO ENDPOINT` / `LINK WS NO URL` | 缺少当前语音协议的连接配置。 |
+| `LINK TLS SETUP 8017` | TLS 初始化失败。串口会记录 mbedTLS 底层错误和内部 RAM、PSRAM 的最大可用块。 |
 | `LINK … NO HELLO` / `LINK WS NO USER CONTEXT` | 未收到服务器握手 / 用户上下文。 |
 | `VOICE AUDIO TX OK` / `VOICE OPUS NO TX` | 本轮至少发送一帧音频 / 已编码，松键时发送尚未成功。 |
 | `VOICE MIC OR RATE ERR` / `VOICE NO MIC SAMPLES` | 麦克风读取或重采样失败 / 尚未采集到一块音频。 |
