@@ -81,7 +81,7 @@ public:
     bool IsCellularNetwork() const { return env->cellular; }
     bool IsNetworkReady() const { return (env->bits & EVENT_GOT_IP_BIT) != 0; }
     bool HasUsbModem() const { return usb_device_addr_ != 0; }
-    void SetNetworkDiagnostic(DiagnosticChannel channel, const char* message) {
+    void SetNetworkDiagnostic(DiagnosticChannel channel, const char* message, bool = true) {
         (channel == DiagnosticChannel::Usb ? env->usb_diagnostic : env->network_diagnostic) = message;
     }
     void OnNetworkEvent(NetworkEvent event, const std::string& = "") {

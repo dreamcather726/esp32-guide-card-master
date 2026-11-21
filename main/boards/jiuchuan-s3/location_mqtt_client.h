@@ -75,6 +75,7 @@ private:
     uint64_t runtime_base_seconds_ = 0;
     uint64_t user_playback_baseline_seconds_ = 0;
     uint32_t user_conversation_baseline_ = 0;
+    uint32_t online_report_count_ = 0;
 
     static void TaskEntry(void* arg);
     static void MqttEventEntry(void* handler_args,
@@ -83,7 +84,7 @@ private:
                                void* event_data);
 
     void Run();
-    void SetScreenDiagnostic(const char* message);
+    void SetScreenDiagnostic(const char* message, bool fault = true);
     bool WaitOrStop(uint32_t delay_ms);
     bool FetchCredentials(const std::string& cab_guid,
                           Credentials& credentials);

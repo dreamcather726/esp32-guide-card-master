@@ -72,26 +72,29 @@ constexpr int64_t kBleBeaconMaxAgeUs = 90LL * 1000 * 1000;
 std::mutex ble_beacon_mutex;
 std::array<BleBeaconSample, 16> ble_beacons{};
 
-void AddBleBeaconReport(cJSON* root) {
+int AddBleBeaconReport(cJSON* root) {
     const auto snapshot = [] {
         std::lock_guard lock(ble_beacon_mutex);
         return ble_beacons;
     }();
     const int64_t now = esp_timer_get_time();
     std::unique_ptr<cJSON, decltype(&cJSON_Delete)> items(cJSON_CreateArray(), cJSON_Delete);
-    if (!items) return;
+    if (!items) return -1;
     for (const auto& sample : snapshot) {
         if (sample.mac[0] == '\0' || now - sample.seen_us >= kBleBeaconMaxAgeUs) continue;
         auto* entry = cJSON_CreateObject();
-        if (!entry) return;
+        if (!entry) return -1;
         if (!cJSON_AddStringToObject(entry, "macAddress", sample.mac) ||
             !cJSON_AddNumberToObject(entry, "rssi", sample.rssi) ||
             !cJSON_AddItemToArray(items.get(), entry)) {
             cJSON_Delete(entry);
-            return;
+            return -1;
         }
     }
-    if (cJSON_AddItemToObject(root, "bleBeacons", items.get())) items.release();
+    const int count = cJSON_GetArraySize(items.get());
+    if (!cJSON_AddItemToObject(root, "bleBeacons", items.get())) return -1;
+    items.release();
+    return count;
 }
 
 std::string Trim(std::string value) {
@@ -433,8 +436,11 @@ void LocationMqttClient::Start() {
     }
 }
 
-void LocationMqttClient::SetScreenDiagnostic(const char* message) {
-    if (auto* display = board_.GetDisplay()) display->SetDiagnostic(DiagnosticChannel::BusinessMqtt, message);
+void LocationMqttClient::SetScreenDiagnostic(const char* message, bool fault) {
+    if (auto* display = board_.GetDisplay()) {
+        if (fault) display->SetDiagnostic(DiagnosticChannel::BusinessMqtt, message);
+        else display->SetDiagnosticStatus(DiagnosticChannel::BusinessMqtt, message);
+    }
 }
 
 void LocationMqttClient::Stop() {
@@ -485,6 +491,7 @@ void LocationMqttClient::Run() {
 
         const std::string physical_imei = board_.GetImei();
         if (physical_imei.empty()) {
+            SetScreenDiagnostic("BIZ MQTT WAIT IMEI", false);
             ESP_LOGW(kTag, "physical IMEI is not ready; credentials request postponed");
             if (WaitOrStop(kRetryDelayMs)) {
                 break;
@@ -842,7 +849,7 @@ void LocationMqttClient::HandleMqttEvent(int32_t event_id,
             break;
         case MQTT_EVENT_CONNECTED:
             connected_ = true;
-            SetScreenDiagnostic("");
+            SetScreenDiagnostic("BIZ MQTT ONLINE", false);
             ESP_LOGI(kTag, "[CONNECTED] broker=%s clientId=%s CONNACK=0", BrokerAddressForLog(active_credentials_.wss_url).c_str(), cab_guid_.c_str());
             SubscribeBusinessTopics(event->client);
             report_requested_ = true;
@@ -1411,6 +1418,7 @@ bool LocationMqttClient::PublishOnlineReport() {
         cab_guid_.empty()) {
         return false;
     }
+    auto* display = board_.GetDisplay();
 
     std::string group_id;
     const auto binding = board_.GetUserBinding();
@@ -1469,6 +1477,7 @@ bool LocationMqttClient::PublishOnlineReport() {
 
     cJSON* root = cJSON_CreateObject();
     if (!root) {
+        if (display) display->SetDiagnostic(DiagnosticChannel::OnlineReport, "KJ JSON NO MEM");
         ESP_LOGE(kTag, "failed to allocate KJ JSON");
         return false;
     }
@@ -1494,11 +1503,12 @@ bool LocationMqttClient::PublishOnlineReport() {
     AddString(root, "Playback Duration", std::to_string(user_playback_seconds));
     AddString(root, "Conversation Count", std::to_string(user_conversations));
     AddString(root, "Role", role);
-    AddBleBeaconReport(root);
+    const int beacon_count = AddBleBeaconReport(root);
 
     char* payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!payload) {
+        if (display) display->SetDiagnostic(DiagnosticChannel::OnlineReport, "KJ JSON NO MEM");
         ESP_LOGE(kTag, "failed to serialize KJ report");
         return false;
     }
@@ -1508,6 +1518,19 @@ bool LocationMqttClient::PublishOnlineReport() {
     ESP_LOGI(kTag, "TX topic=%s message_id=%d payload=%s",
              kOnlineTopic, message_id, payload);
     cJSON_free(payload);
+    if (message_id >= 0) {
+        ++online_report_count_;
+        if (display && beacon_count >= 0) {
+            char diagnostic[40];
+            std::snprintf(diagnostic, sizeof(diagnostic), "KJ TX #%lu BLE=%d",
+                          static_cast<unsigned long>(online_report_count_), beacon_count);
+            display->SetDiagnosticStatus(DiagnosticChannel::OnlineReport, diagnostic);
+        } else if (display) {
+            display->SetDiagnostic(DiagnosticChannel::OnlineReport, "KJ BLE NO MEM");
+        }
+    } else if (display) {
+        display->SetDiagnostic(DiagnosticChannel::OnlineReport, "KJ SEND ERROR");
+    }
     return message_id >= 0;
 }
 

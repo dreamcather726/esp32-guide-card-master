@@ -95,6 +95,9 @@ struct NoEmojiSpiLcdDisplay {
         Check(channel == DiagnosticChannel::Qr, "wrong QR diagnostic channel");
         diagnostic = value;
     }
+    void SetDiagnosticStatus(DiagnosticChannel channel, const char* value) {
+        SetDiagnostic(channel, value);
+    }
     void SetStartupQrImage(std::unique_ptr<LvglImage> value, const std::string& imei) {
         Check(imei == kImei, "startup display IMEI mismatch");
         ++shows; image = std::move(value);

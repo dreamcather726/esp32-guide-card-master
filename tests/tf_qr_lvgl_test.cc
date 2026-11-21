@@ -2,6 +2,7 @@
 #include <lvgl.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -46,6 +47,7 @@ class BaseDisplay {
 public:
     virtual void SetChatMessage(const char*, const char*) {}
     virtual void SetDiagnostic(DiagnosticChannel, const char*) {}
+    virtual void SetDiagnosticStatus(DiagnosticChannel, const char*) {}
 };
 class TestDisplay : public BaseDisplay {
 public:
@@ -159,6 +161,23 @@ int main() {
     board.SetDiagnostic(DiagnosticChannel::Qr, "");
     board.RefreshDiagnostics();
     Check(lv_obj_has_flag(board.diagnostic_label_, LV_OBJ_FLAG_HIDDEN), "resolved diagnostics stayed visible");
+    board.SetDiagnosticStatus(DiagnosticChannel::Usb, "USB IMEI OK");
+    board.SetDiagnosticStatus(DiagnosticChannel::Qr, "QR SAVED TF");
+    board.SetDiagnosticStatus(DiagnosticChannel::Ble, "BLE D9:62:62:00:00:0D -83");
+    board.SetDiagnosticStatus(DiagnosticChannel::OnlineReport, "KJ TX #1 BLE=1");
+    board.RefreshDiagnostics();
+    Check(lv_obj_has_flag(board.diagnostic_label_, LV_OBJ_FLAG_HIDDEN), "ordinary status covered normal pages");
+    board.ToggleDiagnosticPage();
+    lv_obj_update_layout(board.diagnostic_label_);
+    Check(board.IsDiagnosticPageOpen(), "diagnostic page did not open");
+    Check(std::strcmp(lv_label_get_text(board.diagnostic_label_),
+          "USB IMEI OK\nNET WAIT\nQR SAVED TF\nWAV WAIT\nBLE D9:62:62:00:00:0D -83\n"
+          "BIZ MQTT WAIT\nPOS MQTT WAIT\nKJ TX #1 BLE=1") == 0, "diagnostic page missing status");
+    Check(lv_obj_get_y(board.diagnostic_label_) >= 0 &&
+          lv_obj_get_y(board.diagnostic_label_) + lv_obj_get_height(board.diagnostic_label_) <= 135,
+          "eight diagnostic lines do not fit the LCD");
+    board.ToggleDiagnosticPage();
+    Check(lv_obj_has_flag(board.diagnostic_label_, LV_OBJ_FLAG_HIDDEN), "diagnostic page did not close");
     Check(std::strcmp(lv_label_get_text(board.status_label_), "Initializing") == 0, "initialization status missing");
     board.SetStartupQrImage(std::make_unique<LvglImage>(300), "864479086534998");
     lv_tick_inc(5000); lv_timer_handler();

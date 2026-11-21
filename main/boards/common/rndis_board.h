@@ -50,7 +50,7 @@ private:
 
     bool InitializeUsbCdcHost();
     bool install_rndis(uint16_t idVendor, uint16_t idProduct, const char *netif_name);
-    void SetNetworkDiagnostic(DiagnosticChannel channel, const char* message);
+    void SetNetworkDiagnostic(DiagnosticChannel channel, const char* message, bool fault = true);
     static void iot_event_handle(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
     static void UsbDeviceEventCallback(usbh_cdc_device_event_t event,
                                        usbh_cdc_device_event_data_t *event_data,

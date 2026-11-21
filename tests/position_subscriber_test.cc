@@ -118,10 +118,27 @@ struct Display {
     NavigationStatus navigation;
     int updates = 0;
     std::string business_diagnostic, position_diagnostic;
+    std::string ble_diagnostic, report_diagnostic;
+    bool report_fault = false;
     void SetDiagnostic(DiagnosticChannel channel, const char* message) {
-        (channel == DiagnosticChannel::BusinessMqtt ? business_diagnostic : position_diagnostic) = message;
+        SetDiagnosticStatus(channel, message);
+        if (channel == DiagnosticChannel::OnlineReport) report_fault = true;
+    }
+    void SetDiagnosticStatus(DiagnosticChannel channel, const char* message) {
+        if (channel == DiagnosticChannel::BusinessMqtt) business_diagnostic = message;
+        if (channel == DiagnosticChannel::PositionMqtt) position_diagnostic = message;
+        if (channel == DiagnosticChannel::Ble) ble_diagnostic = message;
+        if (channel == DiagnosticChannel::OnlineReport) {
+            report_diagnostic = message;
+            report_fault = false;
+        }
     }
     void SetNavigationStatus(const NavigationStatus& status) { navigation = status; ++updates; }
+};
+struct Board {
+    static Board& GetInstance() { static Board board; return board; }
+    Display display;
+    Display* GetDisplay() { return &display; }
 };
 namespace ml307_at {
 static bool IsImei(const std::string& value) { return value.size() == 15; }
@@ -189,10 +206,11 @@ struct SystemInfo { static std::string GetMacAddress() { return "AA:BB:CC:DD:EE:
 struct esp_app_desc_t { char version[32]; };
 static const esp_app_desc_t* esp_app_get_description() { static const esp_app_desc_t info{"2.1.34"}; return &info; }
 static std::string online_payload;
+static int online_publish_result = 1;
 static int esp_mqtt_client_publish(Client*, const char* address, const char* payload, int len, int qos, int retain) {
     assert(std::string(address) == kOnlineTopic && len == 0 && qos == 0 && retain == 0);
     online_payload = payload;
-    return 1;
+    return online_publish_result;
 }
 #include "beacon_report.inc"
 
@@ -257,6 +275,8 @@ int main() {
         const auto* first = cJSON_GetArrayItem(list, 0);
         assert(std::string(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(first, "macAddress"))) == "D9:62:62:00:00:0D");
         assert(cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(first, "rssi")) == -71);
+        assert(Board::GetInstance().display.ble_diagnostic == "BLE D9:62:62:00:00:0D -71");
+        assert(board.display.report_diagnostic == "KJ TX #1 BLE=1" && !board.display.report_fault);
         assert(std::string(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json.get(), "macAddress"))) == "AA:BB:CC:DD:EE:FF");
 
         event.disc.addr.val[5] = 0xD9;
@@ -271,6 +291,11 @@ int main() {
         now_us += 90 * 1000 * 1000;
         json = report();
         assert(cJSON_GetArraySize(beacons(json.get())) == 0);
+        assert(board.display.report_diagnostic == "KJ TX #3 BLE=0");
+        online_publish_result = -1;
+        assert(!manager.PublishOnlineReport());
+        assert(board.display.report_diagnostic == "KJ SEND ERROR" && board.display.report_fault);
+        online_publish_result = 1;
         manager.mqtt_client_ = nullptr;
         manager.connected_ = false;
         std::cout << "PASS BLE filter through KJ publication: latest RSSI, capacity, expiry and device MAC\n";
@@ -349,7 +374,7 @@ int main() {
         EventData event; event.client = &client;
         subscriber.HandleEvent(MQTT_EVENT_BEFORE_CONNECT, &event);
         Connected(); subscriber.HandleEvent(MQTT_EVENT_SUBSCRIBED, &event);
-        assert(board.display.position_diagnostic.empty());
+        assert(board.display.position_diagnostic == "POS MQTT SUB OK");
         ErrorData error; error.error_type = 2; error.connect_return_code = 4;
         event.error_handle = &error; subscriber.HandleEvent(MQTT_EVENT_ERROR, &event);
         assert(board.display.position_diagnostic == "POS MQTT CONNACK 4");

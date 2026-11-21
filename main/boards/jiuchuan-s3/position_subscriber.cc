@@ -20,8 +20,11 @@ PositionSubscriber::~PositionSubscriber() {
     StopClient();
 }
 
-void PositionSubscriber::SetScreenDiagnostic(const char* message) {
-    if (auto* display = board_.GetDisplay()) display->SetDiagnostic(DiagnosticChannel::PositionMqtt, message);
+void PositionSubscriber::SetScreenDiagnostic(const char* message, bool fault) {
+    if (auto* display = board_.GetDisplay()) {
+        if (fault) display->SetDiagnostic(DiagnosticChannel::PositionMqtt, message);
+        else display->SetDiagnosticStatus(DiagnosticChannel::PositionMqtt, message);
+    }
 }
 
 void PositionSubscriber::ClearPosition() {
@@ -93,7 +96,10 @@ void PositionSubscriber::Poll() {
     const bool ready = board_.IsCellularNetwork() ? board_.IsNetworkReady() : network_ready_();
     const std::string imei = board_.GetImei();
     if (!ready || !ml307_at::IsImei(imei)) {
-        if (client_) StopClient();
+        if (client_) {
+            StopClient();
+            SetScreenDiagnostic(ready ? "POS MQTT WAIT IMEI" : "POS MQTT OFFLINE");
+        }
     } else {
         if (!configured) SetScreenDiagnostic("POS MQTT NO CONFIG");
         if (client_ && imei != imei_) {
@@ -112,6 +118,7 @@ void PositionSubscriber::Poll() {
         if (last > 0 && now - last >= kPositionTimeoutUs) {
             received_at_ = 0;
             if (auto* display = board_.GetDisplay()) display->SetNavigationStatus(NavigationStatus{});
+            SetScreenDiagnostic("POS MQTT DATA STALE", false);
         }
     }
 }
@@ -129,17 +136,18 @@ void PositionSubscriber::HandleEvent(int32_t id, esp_mqtt_event_handle_t event) 
         ESP_LOGI(kTag, "[CONNECTED] broker=%s clientId=%s CONNACK=0", JIUCHUAN_POSITION_MQTT_URI, client_id_.c_str());
         message_.Reset();
         const int message_id = esp_mqtt_client_subscribe(event->client, topic_.c_str(), 0);
-        SetScreenDiagnostic(message_id < 0 ? "POS MQTT SUB ERROR" : "POS MQTT WAIT SUBACK");
+        SetScreenDiagnostic(message_id < 0 ? "POS MQTT SUB ERROR" : "POS MQTT WAIT SUBACK", message_id < 0);
         ESP_LOGI(kTag, "[SUBSCRIBE] broker=%s topic=%s message_id=%d", JIUCHUAN_POSITION_MQTT_URI, topic_.c_str(), message_id);
     } else if (id == MQTT_EVENT_SUBSCRIBED) {
-        SetScreenDiagnostic("");
+        SetScreenDiagnostic("POS MQTT SUB OK", false);
         ESP_LOGI(kTag, "[SUBSCRIBED] broker=%s topic=%s message_id=%d", JIUCHUAN_POSITION_MQTT_URI, topic_.c_str(), event->msg_id);
     } else if (id == MQTT_EVENT_DISCONNECTED) {
-        if (mqtt_connected_) SetScreenDiagnostic("POS MQTT OFFLINE");
+        const bool was_connected = mqtt_connected_;
         mqtt_connected_ = false;
         ESP_LOGW(kTag, "[DISCONNECTED] broker=%s; automatic reconnect in 5 seconds", JIUCHUAN_POSITION_MQTT_URI);
         message_.Reset();
         ClearPosition();
+        if (was_connected) SetScreenDiagnostic("POS MQTT OFFLINE");
     } else if (id == MQTT_EVENT_DATA) {
         NavigationStatus status;
         if (message_.Feed(topic_, event->topic, event->topic_len, event->data, event->data_len,
@@ -147,10 +155,14 @@ void PositionSubscriber::HandleEvent(int32_t id, esp_mqtt_event_handle_t event) 
             std::lock_guard<std::mutex> lock(navigation_mutex_);
             received_at_ = esp_timer_get_time();
             if (auto* display = board_.GetDisplay()) display->SetNavigationStatus(status);
+            char diagnostic[40];
+            std::snprintf(diagnostic, sizeof(diagnostic), "POS RX FIX=%d SAT=%d", status.has_fix, status.satellites);
+            SetScreenDiagnostic(diagnostic, false);
             ESP_LOGD(kTag, "Position received: fix=%d nsat=%d", status.has_fix, status.satellites);
         }
     } else if (id == MQTT_EVENT_ERROR) {
         mqtt_connected_ = false;
+        ClearPosition();
         char diagnostic[40] = "POS MQTT LINK ERROR";
         if (event->error_handle && event->error_handle->error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
             std::snprintf(diagnostic, sizeof(diagnostic), "POS MQTT CONNACK %d",

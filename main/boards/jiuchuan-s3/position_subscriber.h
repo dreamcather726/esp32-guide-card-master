@@ -29,7 +29,7 @@ private:
     bool StartClient(const std::string& imei);
     void StopClient();
     void ClearPosition();
-    void SetScreenDiagnostic(const char* message);
+    void SetScreenDiagnostic(const char* message, bool fault = true);
     static void Event(void*, esp_event_base_t, int32_t, void*);
     void HandleEvent(int32_t event_id, esp_mqtt_event_handle_t event);
 };

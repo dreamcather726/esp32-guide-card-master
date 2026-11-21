@@ -47,6 +47,7 @@ public:
     virtual void SetNavigationStatus(const NavigationStatus&) {}
     virtual void SetGuideView(const GuideView&) {}
     virtual void SetDiagnostic(DiagnosticChannel, const char*) {}
+    virtual void SetDiagnosticStatus(DiagnosticChannel, const char*) {}
     virtual void SetTheme(Theme* theme);
     virtual Theme* GetTheme() { return current_theme_; }
     virtual void UpdateStatusBar(bool update_all = false);

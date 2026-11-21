@@ -82,6 +82,9 @@ int OnBleBeaconReport(ble_gap_event* event, void*) {
         ESP_LOGI(kBeaconTag, "MAC=%s RSSI=unknown", mac);
     } else {
         LocationMqttClient::RecordBleBeacon(mac, report.rssi);
+        char diagnostic[40];
+        std::snprintf(diagnostic, sizeof(diagnostic), "BLE %s %d", mac, report.rssi);
+        Board::GetInstance().GetDisplay()->SetDiagnosticStatus(DiagnosticChannel::Ble, diagnostic);
         ESP_LOGI(kBeaconTag, "MAC=%s RSSI=%d dBm", mac, report.rssi);
     }
     return 0;
@@ -100,8 +103,12 @@ void OnBleBeaconSync() {
         result = ble_gap_disc(own_address_type, BLE_HS_FOREVER, &scan, OnBleBeaconReport, nullptr);
     }
     if (result == 0) {
+        Board::GetInstance().GetDisplay()->SetDiagnosticStatus(DiagnosticChannel::Ble, "BLE SCAN D9:62:62");
         ESP_LOGI(kBeaconTag, "Passive BLE scan started; MAC contains %s", kBeaconMacFilter);
     } else if (result != BLE_HS_EALREADY) {
+        char diagnostic[40];
+        std::snprintf(diagnostic, sizeof(diagnostic), "BLE SCAN E%d", result);
+        Board::GetInstance().GetDisplay()->SetDiagnostic(DiagnosticChannel::Ble, diagnostic);
         ESP_LOGE(kBeaconTag, "BLE scan failed: %d", result);
     }
 }
@@ -111,6 +118,9 @@ void StartBleBeaconScan() {
     if (started) return;
     const esp_err_t result = nimble_port_init();
     if (result != ESP_OK) {
+        char diagnostic[40];
+        std::snprintf(diagnostic, sizeof(diagnostic), "BLE INIT E%X", static_cast<unsigned>(result));
+        Board::GetInstance().GetDisplay()->SetDiagnostic(DiagnosticChannel::Ble, diagnostic);
         ESP_LOGE(kBeaconTag, "BLE init failed: %s", esp_err_to_name(result));
         return;
     }
@@ -120,6 +130,7 @@ void StartBleBeaconScan() {
             vTaskDelete(nullptr);
         }, "nimble_host", CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE, nullptr, configMAX_PRIORITIES - 4,
         nullptr, CONFIG_BT_NIMBLE_PINNED_TO_CORE) != pdPASS) {
+        Board::GetInstance().GetDisplay()->SetDiagnostic(DiagnosticChannel::Ble, "BLE TASK NO MEM");
         ESP_LOGE(kBeaconTag, "BLE host task creation failed; internal_largest=%u",
                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
         const auto cleanup = nimble_port_deinit();
@@ -206,7 +217,12 @@ private:
     GuideView guide_view_;
     NavigationStatus navigation_status_;
     std::mutex diagnostic_mutex_;
-    std::array<std::array<char, 40>, static_cast<size_t>(DiagnosticChannel::Count)> diagnostics_{};
+    struct DiagnosticLine {
+        std::array<char, 40> text{};
+        bool fault = false;
+    };
+    std::array<DiagnosticLine, static_cast<size_t>(DiagnosticChannel::Count)> diagnostics_{};
+    std::atomic<bool> diagnostic_page_open_{false};
     bool diagnostic_dirty_ = false;
     lv_obj_t* diagnostic_label_ = nullptr;
     const RndisBoard& rndis_board_;
@@ -238,26 +254,44 @@ private:
         lv_obj_add_flag(diagnostic_label_, LV_OBJ_FLAG_HIDDEN);
     }
 
-    void RefreshDiagnostics() {
+    void RefreshDiagnostics(bool force = false) {
         decltype(diagnostics_) snapshot;
         {
             std::lock_guard lock(diagnostic_mutex_);
-            if (!diagnostic_dirty_) return;
+            if (!diagnostic_dirty_ && !force) return;
             snapshot = diagnostics_;
             diagnostic_dirty_ = false;
         }
         std::string text;
-        for (const auto& line : snapshot) {
-            if (line.front() == '\0') continue;
+        const bool show_all = diagnostic_page_open_.load();
+        const std::array<const char*, static_cast<size_t>(DiagnosticChannel::Count)> defaults = {
+            "USB WAIT", "NET WAIT", "QR WAIT", "WAV WAIT",
+            "BLE WAIT", "BIZ MQTT WAIT", "POS MQTT WAIT", "KJ WAIT",
+        };
+        for (size_t i = 0; i < snapshot.size(); ++i) {
+            const auto& line = snapshot[i];
+            const bool empty = line.text.front() == '\0';
+            if (!show_all && (!line.fault || empty)) continue;
             if (!text.empty()) text += '\n';
-            text += line.data();
+            text += empty ? defaults[i] : line.text.data();
         }
         if (text.empty()) {
             lv_obj_add_flag(diagnostic_label_, LV_OBJ_FLAG_HIDDEN);
             return;
         }
         lv_label_set_text(diagnostic_label_, text.c_str());
+        lv_obj_align(diagnostic_label_, show_all ? LV_ALIGN_CENTER : LV_ALIGN_BOTTOM_MID,
+                     0, show_all ? 0 : -21);
         lv_obj_remove_flag(diagnostic_label_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    void SetDiagnosticLine(DiagnosticChannel channel, const char* message, bool fault) {
+        std::lock_guard lock(diagnostic_mutex_);
+        auto& line = diagnostics_[static_cast<size_t>(channel)];
+        if (line.fault == fault && std::strcmp(line.text.data(), message) == 0) return;
+        std::snprintf(line.text.data(), line.text.size(), "%s", message);
+        line.fault = fault;
+        diagnostic_dirty_ = true;
     }
 
     static void SetSubtitleY(void* object, int32_t value) {
@@ -681,11 +715,21 @@ public:
     }
 
     void SetDiagnostic(DiagnosticChannel channel, const char* message) override {
-        std::lock_guard lock(diagnostic_mutex_);
-        auto& line = diagnostics_[static_cast<size_t>(channel)];
-        if (std::strcmp(line.data(), message) == 0) return;
-        std::snprintf(line.data(), line.size(), "%s", message);
-        diagnostic_dirty_ = true;
+        SetDiagnosticLine(channel, message, true);
+    }
+
+    void SetDiagnosticStatus(DiagnosticChannel channel, const char* message) override {
+        SetDiagnosticLine(channel, message, false);
+    }
+
+    bool IsDiagnosticPageOpen() const { return diagnostic_page_open_.load(); }
+
+    void ToggleDiagnosticPage() {
+        DisplayLockGuard lock(this);
+        const bool open = !IsDiagnosticPageOpen();
+        diagnostic_page_open_ = open;
+        RefreshDiagnostics(true);
+        if (open && !startup_qr_image_) lv_obj_move_foreground(diagnostic_label_);
     }
 
     void UpdateStatusBar(bool update_all = false) override {
@@ -827,6 +871,7 @@ private:
         // still resets this timer and restores the saved brightness.
         power_save_timer_ = new PowerSaveTimer(-1, 60, -1);
         power_save_timer_->OnEnterSleepMode([this]() {
+            if (display_ && static_cast<NoEmojiSpiLcdDisplay*>(display_)->IsDiagnosticPageOpen()) return;
             ESP_LOGI(BOARD_TAG, "Display power save: turning backlight off after inactivity");
             if (display_) {
                 display_->SetPowerSaveMode(true);
@@ -1120,6 +1165,7 @@ private:
             return;
         }
         if (state == TfAudioState::Ready) {
+            GetDisplay()->SetDiagnosticStatus(DiagnosticChannel::Audio, "WAV READY TF");
             ESP_LOGI(BOARD_TAG, "[TF_INIT][READY] path=%s already valid; skip download",
                      kStartAudioPath);
             Application::GetInstance().NotifyTfStartAudioReady();
@@ -1149,7 +1195,7 @@ private:
             }
             const auto result = DownloadInitialStartAudio(error);
             if (result == TfDownloadResult::Success) {
-                GetDisplay()->SetDiagnostic(DiagnosticChannel::Audio, "");
+                GetDisplay()->SetDiagnosticStatus(DiagnosticChannel::Audio, "WAV SAVED TF");
                 Application::GetInstance().NotifyTfStartAudioReady();
                 ResolveStartupAudio();
                 return;
@@ -1474,7 +1520,7 @@ private:
             std::unique_ptr<LvglImage> image;
             const auto state = has_imei ? LoadStartupQr(path, image, error) : TfQrState::NeedsDownload;
             if (state == TfQrState::Ready) {
-                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "");
+                GetDisplay()->SetDiagnosticStatus(DiagnosticChannel::Qr, "QR READY TF");
                 ESP_LOGI(BOARD_TAG, "[TF_QR][READY] local path=%s; skip download", path.c_str());
                 ShowStartupQr(std::move(image), imei);
                 return;
@@ -1506,7 +1552,7 @@ private:
                 GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR DOWNLOADING");
                 const auto result = DownloadStartupQr(url, path, temporary_path, image, error);
                 if (result == TfDownloadResult::Success) {
-                    GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "");
+                    GetDisplay()->SetDiagnosticStatus(DiagnosticChannel::Qr, "QR SAVED TF");
                     ShowStartupQr(std::move(image), imei);
                     return;
                 }
@@ -1642,6 +1688,12 @@ private:
 
         replay_button_.OnPressDown([this]() {
             power_save_timer_->WakeUp();
+        });
+        replay_button_.OnLongPress([this]() {
+            Application::GetInstance().Schedule([this]() {
+                power_save_timer_->WakeUp();
+                static_cast<NoEmojiSpiLcdDisplay*>(display_)->ToggleDiagnosticPage();
+            });
         });
         replay_button_.OnClick([this]() {
             power_save_timer_->WakeUp();
@@ -1957,6 +2009,7 @@ public:
         }
 #if defined(CONFIG_BT_NIMBLE_ROLE_OBSERVER) && !defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
         if (!cellular_network_) StartBleBeaconScan();
+        else GetDisplay()->SetDiagnosticStatus(DiagnosticChannel::Ble, "BLE WAIT AT");
 #endif
     }
 
@@ -1972,6 +2025,14 @@ public:
             if (event == NetworkEvent::Connected) startup_network_ready_ = true;
             if (event == NetworkEvent::Disconnected || event == NetworkEvent::Scanning)
                 startup_network_ready_ = false;
+            if (!cellular_network_) {
+                if (event == NetworkEvent::Connected)
+                    display_->SetDiagnosticStatus(DiagnosticChannel::Network, "WIFI IP OK");
+                else if (event == NetworkEvent::Disconnected)
+                    display_->SetDiagnostic(DiagnosticChannel::Network, "WIFI LINK DOWN");
+                else if (event == NetworkEvent::Connecting)
+                    display_->SetDiagnosticStatus(DiagnosticChannel::Network, "WIFI WAIT IP");
+            }
             if (callback) callback(event, data);
             if (event == NetworkEvent::ModemDetecting && data == "ML307 USB") {
                 Application::GetInstance().Schedule([this]() {

@@ -42,4 +42,10 @@ I (...) BleBeacon: MAC=D9:62:62:00:00:0D RSSI=-83 dBm
 {"cmd":"KJ","bleBeacons":[{"macAddress":"D9:62:62:00:00:0D","rssi":-83}]}
 ```
 
+## 屏幕诊断
+
+从 `2.1.35` 起，长按回放键约 1.5 秒打开诊断页，再长按关闭。页面显示 USB/IMEI、网络 IP、二维码、WAV、最近一次有效的 BLE MAC 和 RSSI、业务 MQTT、定位 MQTT，以及最近一次 KJ 发送结果。正常界面显示故障提示，开机二维码仍优先占用屏幕。
+
+`POS MQTT SUB OK` 表示定位主题已订阅，`POS RX FIX=1 SAT=15` 表示收到有效定位和 15 颗卫星。BLE 行末数值的单位为 dBm。`KJ TX #3 BLE=2` 表示本次开机 MQTT 客户端已接受第 3 个 KJ 包，包里有 2 个信标。KJ 使用 QoS 0，服务端是否收到需查看服务端订阅记录。
+
 本固件使用 `sdkconfig.jiuchuan-s3`。从旧版构建目录继续编译时，请同步启用该配置里的 NimBLE Observer 选项，或重新生成 sdkconfig。

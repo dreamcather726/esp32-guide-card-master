@@ -118,6 +118,7 @@ struct FakeNetwork {
 struct FakeDisplay {
     std::vector<std::string> notifications;
     void SetDiagnostic(DiagnosticChannel, const char*) {}
+    void SetDiagnosticStatus(DiagnosticChannel, const char*) {}
     void ShowNotification(const char* text, int) { notifications.emplace_back(text); }
 };
 

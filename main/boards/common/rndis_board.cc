@@ -94,8 +94,11 @@ std::string RndisBoard::GetBoardType() {
     return "rndis";
 }
 
-void RndisBoard::SetNetworkDiagnostic(DiagnosticChannel channel, const char* message) {
-    if (auto* display = GetDisplay()) display->SetDiagnostic(channel, message);
+void RndisBoard::SetNetworkDiagnostic(DiagnosticChannel channel, const char* message, bool fault) {
+    if (auto* display = GetDisplay()) {
+        if (fault) display->SetDiagnostic(channel, message);
+        else display->SetDiagnosticStatus(channel, message);
+    }
 }
 
 void RndisBoard::StartNetwork() {
@@ -622,14 +625,18 @@ bool RndisBoard::DetectAndDialUsbAt() {
     if (!identity_ready) {
         identity_ready = QueryAndCacheImei(session);
     }
-    if (HasUsbModem()) SetNetworkDiagnostic(DiagnosticChannel::Usb, identity_ready ? "" : "IMEI READ ERROR");
+    if (HasUsbModem()) {
+        SetNetworkDiagnostic(DiagnosticChannel::Usb, identity_ready ? "USB IMEI OK" : "IMEI READ ERROR",
+                             !identity_ready);
+    }
     if (IsNetworkReady()) {
         ESP_LOGD(TAG, "[USB_AT] RNDIS online; preserve data session, IMEI=%s; no dial-up",
                  identity_ready ? "ready" : "pending");
         return identity_ready;
     }
     if (dial_already_accepted) {
-        SetNetworkDiagnostic(DiagnosticChannel::Network, IsNetworkReady() ? "" : "4G NO IP");
+        const bool ip_ready = IsNetworkReady();
+        SetNetworkDiagnostic(DiagnosticChannel::Network, ip_ready ? "4G IP OK" : "4G NO IP", !ip_ready);
         return identity_ready;
     }
 
@@ -682,10 +689,12 @@ bool RndisBoard::DetectAndDialUsbAt() {
             return false;
         }
         usb_at_dial_succeeded_ = true;
-        SetNetworkDiagnostic(DiagnosticChannel::Network, IsNetworkReady() ? "" : "4G WAIT IP");
+        const bool ip_ready = IsNetworkReady();
+        SetNetworkDiagnostic(DiagnosticChannel::Network, ip_ready ? "4G IP OK" : "4G WAIT IP", !ip_ready);
         ESP_LOGI(TAG, "[USB_AT] RNDIS dial-up command accepted; waiting for USB RNDIS enumeration");
     } else {
-        SetNetworkDiagnostic(DiagnosticChannel::Network, IsNetworkReady() ? "" : "4G DIAL ERROR");
+        const bool ip_ready = IsNetworkReady();
+        SetNetworkDiagnostic(DiagnosticChannel::Network, ip_ready ? "4G IP OK" : "4G DIAL ERROR", !ip_ready);
         ESP_LOGE(TAG, "[USB_AT] RNDIS dial-up command failed");
     }
     return dialed && identity_ready;
@@ -729,7 +738,7 @@ void RndisBoard::NetworkTask() {
             continue;
         }
         if (bits & EVENT_USB_DEVICE_BIT) {
-            SetNetworkDiagnostic(DiagnosticChannel::Usb, "");
+            SetNetworkDiagnostic(DiagnosticChannel::Usb, "USB ML307 OK", false);
             failures = 0;
             if (!IsNetworkReady()) {
                 OnNetworkEvent(NetworkEvent::Connecting, "ML307 USB");
@@ -832,7 +841,7 @@ void RndisBoard::iot_event_handle(void *arg, esp_event_base_t event_base, int32_
         // previous order allowed the first MQTT HTTP request to race DNS setup.
         ConfigureRndisDns(board->s_rndis_netif);
         xEventGroupSetBits(board->s_event_group, EVENT_GOT_IP_BIT | EVENT_USB_MAINTENANCE_BIT);
-        board->SetNetworkDiagnostic(DiagnosticChannel::Network, "");
+        board->SetNetworkDiagnostic(DiagnosticChannel::Network, "4G IP OK", false);
         ESP_LOGI(TAG, "USB RNDIS GOT_IP");
         board->OnNetworkEvent(NetworkEvent::Connected, "USB RNDIS");
     }
