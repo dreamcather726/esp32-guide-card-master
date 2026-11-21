@@ -1,6 +1,19 @@
 dependencies:
   idf: '>=5.5.4,<6.0'
+  78/esp-ml307: '3.5.3'
+  78/xiaozhi-fonts: '1.5.5'
+  espressif/adc_battery_estimation:
+    version: '0.2.2'
+    override_path: ../components/espressif__adc_battery_estimation
+  espressif/button: '4.1.7'
   espressif/cmake_utilities: '0.5.3'
+  espressif/dl_fft: '0.7.0'
+  espressif/esp-sr: '2.2.2'
+  espressif/esp_audio_codec: '2.4.1'
+  espressif/esp_audio_effects: '1.2.1'
+  espressif/esp_codec_dev: '1.5.4'
+  espressif/esp_lvgl_port: '2.6.3'
+  espressif/esp_new_jpeg: '0.6.1'
   espressif/iot_eth: '1.1.0'
   espressif/iot_usbh_cdc:
     version: '3.1.0'
@@ -8,3 +21,5 @@ dependencies:
   espressif/iot_usbh_rndis:
     version: '0.3.1'
     override_path: ../components/iot_usbh_rndis
+  espressif/led_strip: '3.0.3'
+  lvgl/lvgl: '9.3.0'
