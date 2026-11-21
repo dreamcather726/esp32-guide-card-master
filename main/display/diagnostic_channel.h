@@ -1,3 +1,3 @@
 #pragma once
 
-enum class DiagnosticChannel { Usb, Network, Qr, Audio, Ble, BusinessMqtt, PositionMqtt, OnlineReport, Count };
+enum class DiagnosticChannel { Voice, VoiceLink, Usb, Network, Qr, Audio, BusinessMqtt, PositionMqtt, OnlineReport, Count };

@@ -2,10 +2,12 @@
 #include "board.h"
 #include "system_info.h"
 #include "application.h"
+#include "display.h"
 #include "settings.h"
 #include "user_binding_json.h"
 
 #include <cstring>
+#include <cstdio>
 #include <cJSON.h>
 #include <esp_log.h>
 #include <arpa/inet.h>
@@ -101,10 +103,12 @@ void WebsocketProtocol::CloseAudioChannel() {
 bool WebsocketProtocol::OpenAudioChannel() {
     CloseAudioChannel();
     auto& board = Board::GetInstance();
+    auto* display = board.GetDisplay();
     binding_required_ = board.RequiresUserBinding();
     channel_binding_ = board.GetUserBinding();
     if (binding_required_ && !channel_binding_.IsBound()) {
         ESP_LOGW(TAG, "Audio channel requires a boot-scoped binding");
+        display->SetDiagnostic(DiagnosticChannel::VoiceLink, "LINK WS NO BINDING");
         return false;
     }
     if (binding_required_) board.SetUserBindingState(channel_binding_, BindingState::Pending);
@@ -122,11 +126,19 @@ bool WebsocketProtocol::OpenAudioChannel() {
     }
 
     error_occurred_ = false;
+    if (url.empty()) {
+        display->SetDiagnostic(DiagnosticChannel::VoiceLink, "LINK WS NO URL");
+        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        return false;
+    }
+    display->SetDiagnosticStatus(DiagnosticChannel::VoiceLink,
+        binding_required_ ? "LINK WS CONNECT + BIND" : "LINK WS CONNECT NO BIND");
 
     auto network = Board::GetInstance().GetNetwork();
     websocket_ = network->CreateWebSocket(1);
     if (websocket_ == nullptr) {
         ESP_LOGE(TAG, "Failed to create websocket");
+        display->SetDiagnostic(DiagnosticChannel::VoiceLink, "LINK WS INIT ERR");
         return false;
     }
 
@@ -228,6 +240,9 @@ bool WebsocketProtocol::OpenAudioChannel() {
     ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
     if (!websocket_->Connect(url.c_str())) {
         ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", websocket_->GetLastError());
+        char diagnostic[40];
+        std::snprintf(diagnostic, sizeof(diagnostic), "LINK WS ERR %d", websocket_->GetLastError());
+        display->SetDiagnostic(DiagnosticChannel::VoiceLink, diagnostic);
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         CloseAudioChannel();
         return false;
@@ -237,6 +252,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
     auto message = GetHelloMessage();
     // Only hello bypasses the verified-context send gate.
     if (!websocket_->Send(message)) {
+        display->SetDiagnostic(DiagnosticChannel::VoiceLink, "LINK WS SEND ERR");
         SetError(Lang::Strings::SERVER_ERROR);
         CloseAudioChannel();
         return false;
@@ -245,6 +261,8 @@ bool WebsocketProtocol::OpenAudioChannel() {
     // One deadline for hello AND user_context; either arrival order is supported.
     const EventBits_t required = WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT |
         (binding_required_ ? WEBSOCKET_PROTOCOL_USER_CONTEXT_EVENT : 0);
+    display->SetDiagnosticStatus(DiagnosticChannel::VoiceLink,
+        binding_required_ ? "LINK WS WAIT USER" : "LINK WS WAIT HELLO");
     EventBits_t received = 0;
     const TickType_t started = xTaskGetTickCount();
     const TickType_t timeout = pdMS_TO_TICKS(binding_required_ ? 30000 : 10000);
@@ -258,6 +276,9 @@ bool WebsocketProtocol::OpenAudioChannel() {
     if ((received & required) != required || context_failed_) {
         if (binding_required_) FailUserContext();
         else SetError(Lang::Strings::SERVER_TIMEOUT);
+        display->SetDiagnostic(DiagnosticChannel::VoiceLink,
+            context_failed_ ? "LINK WS CLOSED OR REJECT" :
+            !(received & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT) ? "LINK WS NO HELLO" : "LINK WS NO USER CONTEXT");
         CloseAudioChannel();
         return false;
     }
@@ -270,11 +291,14 @@ bool WebsocketProtocol::OpenAudioChannel() {
         channel_ready_ = validated;
     }
     if (!validated) {
+        display->SetDiagnostic(DiagnosticChannel::VoiceLink, "LINK WS USER VERIFY ERR");
         FailUserContext();
         CloseAudioChannel();
         return false;
     }
 
+    display->SetDiagnosticStatus(DiagnosticChannel::VoiceLink,
+        binding_required_ ? "LINK WS READY + BIND" : "LINK WS READY NO BIND");
     if (on_audio_channel_opened_ != nullptr) {
         on_audio_channel_opened_();
     }

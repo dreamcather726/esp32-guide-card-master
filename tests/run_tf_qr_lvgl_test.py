@@ -23,7 +23,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="vanex-qr-lvgl-") as folder:
         temp = Path(folder)
         (temp / "tf_qr_display_production.inc").write_text(display, encoding="utf-8")
-        (temp / "diagnostics_production.inc").write_text(diagnostics, encoding="utf-8")
+        (temp / "diagnostics_production.inc").write_text(
+            diagnostics.replace("NoEmojiSpiLcdDisplay", "TestDisplay"), encoding="utf-8")
         (temp / "lv_conf.h").write_text(
             "#ifndef LV_CONF_H\n#define LV_CONF_H\n"
             "#define LV_COLOR_DEPTH 16\n#define LV_USE_STDLIB_MALLOC LV_STDLIB_CLIB\n"

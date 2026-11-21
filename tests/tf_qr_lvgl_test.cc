@@ -17,6 +17,7 @@
 #define ESP_LOGI(...) ((void)0)
 namespace Lang { namespace Strings { constexpr auto INITIALIZING = "Initializing"; } }
 static lv_image_dsc_t jiuchuan_logo{};
+static int64_t esp_timer_get_time() { return static_cast<int64_t>(lv_tick_get()) * 1000; }
 
 class LvglImage {
 public:
@@ -187,26 +188,39 @@ int main() {
     Check(lv_obj_has_flag(board.diagnostic_label_, LV_OBJ_FLAG_HIDDEN), "resolved diagnostics stayed visible");
     board.SetDiagnosticStatus(DiagnosticChannel::Usb, "USB IMEI OK");
     board.SetDiagnosticStatus(DiagnosticChannel::Qr, "QR SAVED TF");
-    board.SetDiagnosticStatus(DiagnosticChannel::Ble, "BLE D9:62:62:00:00:0D -83");
-    board.SetDiagnosticStatus(DiagnosticChannel::OnlineReport, "KJ TX #1 BLE=1");
+    board.SetDiagnosticStatus(DiagnosticChannel::OnlineReport, "KJ TX #1");
     board.RefreshDiagnostics();
     Check(lv_obj_has_flag(board.diagnostic_label_, LV_OBJ_FLAG_HIDDEN), "ordinary status covered normal pages");
     board.ToggleDiagnosticPage();
     lv_obj_update_layout(board.diagnostic_label_);
     Check(board.IsDiagnosticPageOpen(), "diagnostic page did not open");
     Check(std::strcmp(lv_label_get_text(board.diagnostic_label_),
-          "USB IMEI OK\nNET WAIT\nQR SAVED TF\nWAV WAIT\nBLE D9:62:62:00:00:0D -83\n"
-          "BIZ MQTT WAIT\nPOS MQTT WAIT\nKJ TX #1 BLE=1") == 0, "diagnostic page missing status");
+          "VOICE IDLE\nLINK WAIT\nUSB IMEI OK\nNET WAIT\nQR SAVED TF\nWAV WAIT\n"
+          "BIZ MQTT WAIT\nPOS MQTT WAIT\nKJ TX #1") == 0, "diagnostic page missing status");
     Check(lv_obj_get_y(board.diagnostic_label_) >= 0 &&
           lv_obj_get_y(board.diagnostic_label_) + lv_obj_get_height(board.diagnostic_label_) <= 135,
-          "eight diagnostic lines do not fit the LCD");
+          "nine diagnostic lines do not fit the LCD");
     board.ToggleDiagnosticPage();
     Check(lv_obj_has_flag(board.diagnostic_label_, LV_OBJ_FLAG_HIDDEN), "diagnostic page did not close");
+    board.SetDiagnosticStatus(DiagnosticChannel::Voice, "PTT HELD");
+    board.SetDiagnosticStatus(DiagnosticChannel::VoiceLink, "LINK WS WAIT HELLO");
+    lv_tick_inc(250); lv_timer_handler();
+    Check(std::strcmp(lv_label_get_text(board.diagnostic_label_), "PTT HELD\nLINK WS WAIT HELLO") == 0 &&
+          !lv_obj_has_flag(board.diagnostic_label_, LV_OBJ_FLAG_HIDDEN), "voice progress did not refresh on its own");
+    board.SetDiagnostic(DiagnosticChannel::VoiceLink, "LINK WS NO HELLO");
+    lv_tick_inc(5100); lv_timer_handler();
+    Check(std::strcmp(lv_label_get_text(board.diagnostic_label_), "LINK WS NO HELLO") == 0 &&
+          !lv_obj_has_flag(board.diagnostic_label_, LV_OBJ_FLAG_HIDDEN), "voice fault did not outlast progress");
+    board.SetDiagnosticStatus(DiagnosticChannel::VoiceLink, "LINK WS READY NO BIND");
+    lv_tick_inc(5100); lv_timer_handler();
+    Check(lv_obj_has_flag(board.diagnostic_label_, LV_OBJ_FLAG_HIDDEN), "resolved voice fault stayed visible");
+    std::cout << "PASS real LVGL: voice progress refreshes, expires, and leaves the connection fault visible\n";
     Check(std::strcmp(lv_label_get_text(board.status_label_), "Initializing") == 0, "initialization status missing");
     board.SetStartupQrImage(std::make_unique<LvglImage>(300), "864479086534998");
     lv_tick_inc(5000); lv_timer_handler();
     Check(completed == 1 && !board.startup_qr_image_, "late QR reopens completed splash");
     std::cout << "PASS real LVGL: splash protects startup screen and finishes exactly once after 3000 ms\n";
+    lv_timer_delete(board.diagnostic_timer_);
     lv_obj_clean(lv_screen_active());
     TestDisplay delayed;
     delayed.BeginStartupPresentation([&]() { ++completed; });
@@ -220,6 +234,7 @@ int main() {
     lv_tick_inc(1); lv_timer_handler();
     Check(completed == 2, "delayed QR did not display for 3 seconds");
     std::cout << "PASS real LVGL: late download gets full 3-second presentation\n";
+    lv_timer_delete(delayed.diagnostic_timer_);
     lv_obj_clean(lv_screen_active());
     TestDisplay offline;
     offline.BeginStartupPresentation([&]() { ++completed; });
@@ -232,6 +247,7 @@ int main() {
     Check(completed == 3, "late first-boot QR never completed");
     std::cout << "PASS real LVGL: download after 60 seconds still presents QR exactly once\n";
     // LVGL objects must be destroyed before the owned descriptor/pixels.
+    lv_timer_delete(offline.diagnostic_timer_);
     lv_obj_clean(lv_screen_active());
     lv_display_delete(display);
     lv_deinit();

@@ -148,7 +148,9 @@ private:
     std::array<DiagnosticLine, static_cast<size_t>(DiagnosticChannel::Count)> diagnostics_{};
     std::atomic<bool> diagnostic_page_open_{false};
     bool diagnostic_dirty_ = false;
+    int64_t voice_status_until_us_ = 0;
     lv_obj_t* diagnostic_label_ = nullptr;
+    lv_timer_t* diagnostic_timer_ = nullptr;
     lv_obj_t* qr_progress_panel_ = nullptr;
     lv_obj_t* qr_progress_label_ = nullptr;
     lv_obj_t* qr_progress_bar_ = nullptr;
@@ -173,34 +175,48 @@ private:
         lv_label_set_long_mode(diagnostic_label_, LV_LABEL_LONG_CLIP);
         lv_obj_set_style_text_font(diagnostic_label_, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(diagnostic_label_, lv_color_white(), 0);
-        lv_obj_set_style_text_line_space(diagnostic_label_, -1, 0);
+        lv_obj_set_style_text_line_space(diagnostic_label_, -3, 0);
         lv_obj_set_style_bg_color(diagnostic_label_, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(diagnostic_label_, LV_OPA_COVER, 0);
         lv_obj_set_style_pad_all(diagnostic_label_, 3, 0);
         lv_obj_align(diagnostic_label_, LV_ALIGN_BOTTOM_MID, 0, -21);
         lv_obj_add_flag(diagnostic_label_, LV_OBJ_FLAG_HIDDEN);
+        diagnostic_timer_ = lv_timer_create([](lv_timer_t* timer) {
+            auto* display = static_cast<NoEmojiSpiLcdDisplay*>(lv_timer_get_user_data(timer));
+            display->RefreshDiagnostics();
+        }, 250, this);
     }
 
     void RefreshDiagnostics(bool force = false) {
         decltype(diagnostics_) snapshot;
+        bool show_voice_progress;
         {
             std::lock_guard lock(diagnostic_mutex_);
+            if (voice_status_until_us_ && esp_timer_get_time() >= voice_status_until_us_) {
+                voice_status_until_us_ = 0;
+                diagnostic_dirty_ = true;
+            }
             if (!diagnostic_dirty_ && !force) return;
             snapshot = diagnostics_;
+            show_voice_progress = voice_status_until_us_ != 0;
             diagnostic_dirty_ = false;
         }
         std::string text;
         const bool show_all = diagnostic_page_open_.load();
         const std::array<const char*, static_cast<size_t>(DiagnosticChannel::Count)> defaults = {
+            "VOICE IDLE", "LINK WAIT",
             "USB WAIT", "NET WAIT", "QR WAIT", "WAV WAIT",
-            "BLE OFF", "BIZ MQTT WAIT", "POS MQTT WAIT", "KJ WAIT",
+            "BIZ MQTT WAIT", "POS MQTT WAIT", "KJ WAIT",
         };
+        unsigned visible_lines = 0;
         for (size_t i = 0; i < snapshot.size(); ++i) {
             const auto& line = snapshot[i];
             const bool empty = line.text.front() == '\0';
-            if (!show_all && (!line.fault || empty)) continue;
+            const bool voice_line = i <= static_cast<size_t>(DiagnosticChannel::VoiceLink);
+            if (!show_all && (empty || (!line.fault && !(voice_line && show_voice_progress)))) continue;
             if (!text.empty()) text += '\n';
             text += empty ? defaults[i] : line.text.data();
+            if (++visible_lines == 4 && !show_all) break;
         }
         if (text.empty()) {
             lv_obj_add_flag(diagnostic_label_, LV_OBJ_FLAG_HIDDEN);
@@ -210,10 +226,16 @@ private:
         lv_obj_align(diagnostic_label_, show_all ? LV_ALIGN_CENTER : LV_ALIGN_BOTTOM_MID,
                      0, show_all ? 0 : -21);
         lv_obj_remove_flag(diagnostic_label_, LV_OBJ_FLAG_HIDDEN);
+        if (!startup_qr_image_) lv_obj_move_foreground(diagnostic_label_);
     }
 
     void SetDiagnosticLine(DiagnosticChannel channel, const char* message, bool fault) {
         std::lock_guard lock(diagnostic_mutex_);
+        if (channel == DiagnosticChannel::Voice || channel == DiagnosticChannel::VoiceLink) {
+            // Show progress briefly; retain fault lines until replaced.
+            voice_status_until_us_ = esp_timer_get_time() + 5000000;
+            diagnostic_dirty_ = true;
+        }
         auto& line = diagnostics_[static_cast<size_t>(channel)];
         if (line.fault == fault && std::strcmp(line.text.data(), message) == 0) return;
         std::snprintf(line.text.data(), line.text.size(), "%s", message);
@@ -450,6 +472,7 @@ public:
         }
         navigation_.reset();
         guide_pages_.reset();
+        if (diagnostic_timer_) lv_timer_delete(diagnostic_timer_);
         lv_obj_delete(diagnostic_label_);
         if (qr_progress_panel_ != nullptr) lv_obj_delete(qr_progress_panel_);
         StopSubtitleScrolling();
@@ -694,7 +717,6 @@ public:
         const bool open = !IsDiagnosticPageOpen();
         diagnostic_page_open_ = open;
         RefreshDiagnostics(true);
-        if (open && !startup_qr_image_) lv_obj_move_foreground(diagnostic_label_);
     }
 
     void SetQrDownloadProgress(size_t received, size_t total, bool verifying = false) {
@@ -1764,6 +1786,7 @@ private:
             voice_button_started_listening_ = false;
             voice_button_down_time_us_ = esp_timer_get_time();
             power_save_timer_->WakeUp();
+            display_->SetDiagnosticStatus(DiagnosticChannel::Voice, "PTT DOWN");
             ESP_LOGI(BOARD_TAG,
                      "Voice button pressed: interrupt current playback immediately");
             Application::GetInstance().InterruptCurrentPlayback();
@@ -1788,6 +1811,7 @@ private:
                          static_cast<long long>(elapsed_ms));
                 Application::GetInstance().StopListening();
             } else {
+                display_->SetDiagnosticStatus(DiagnosticChannel::Voice, "PTT SHORT PRESS");
                 ESP_LOGI(BOARD_TAG, "Voice button short press: interrupt playback (%lld ms)",
                          static_cast<long long>(elapsed_ms));
                 Application::GetInstance().InterruptCurrentPlayback();

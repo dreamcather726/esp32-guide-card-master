@@ -351,9 +351,17 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
-                if (protocol_ && protocol_->IsAudioChannelOpened() &&
-                    !protocol_->SendAudio(std::move(packet))) {
-                    break;
+                if (protocol_ && protocol_->IsAudioChannelOpened()) {
+                    auto* display = Board::GetInstance().GetDisplay();
+                    if (!protocol_->SendAudio(std::move(packet))) {
+                        voice_transmit_ = VoiceTransmit::Failed;
+                        display->SetDiagnostic(DiagnosticChannel::Voice, "VOICE AUDIO TX ERR");
+                        break;
+                    }
+                    if (voice_transmit_ != VoiceTransmit::Sent) {
+                        voice_transmit_ = VoiceTransmit::Sent;
+                        display->SetDiagnosticStatus(DiagnosticChannel::Voice, "VOICE AUDIO TX OK");
+                    }
                 }
             }
         }
@@ -490,6 +498,7 @@ void Application::HandleNetworkDisconnectedEvent() {
     auto state = GetDeviceState();
     if (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking) {
         ESP_LOGI(TAG, "Closing audio channel due to network disconnection");
+        Board::GetInstance().GetDisplay()->SetDiagnostic(DiagnosticChannel::VoiceLink, "LINK 4G DOWN");
         if (protocol_) protocol_->CloseAudioChannel();
     }
 
@@ -791,22 +800,28 @@ void Application::InitializeProtocol() {
     if (board.RequiresUserBinding()) {
         // MQTT/UDP has no verified user-context handshake. Never fall back to it.
         ESP_LOGI(TAG, "Verified user binding requires WebSocket audio");
+        display->SetDiagnosticStatus(DiagnosticChannel::VoiceLink, "LINK WS + BIND");
         protocol_ = std::make_unique<WebsocketProtocol>();
     } else if (ota_->HasMqttConfig()) {
         ESP_LOGI(TAG, "Using MQTT config returned by OTA");
+        display->SetDiagnosticStatus(DiagnosticChannel::VoiceLink, "LINK MQTT CONFIG");
         protocol_ = std::make_unique<MqttProtocol>();
     } else if (ota_->HasWebsocketConfig()) {
         ESP_LOGI(TAG, "Using WebSocket config returned by OTA");
+        display->SetDiagnosticStatus(DiagnosticChannel::VoiceLink, "LINK WS NO BIND");
         protocol_ = std::make_unique<WebsocketProtocol>();
     } else {
         const CachedProtocolType cached_protocol = GetCachedProtocolType();
         if (cached_protocol == CachedProtocolType::Websocket) {
             ESP_LOGW(TAG, "OTA config unavailable; using cached WebSocket config");
+            display->SetDiagnosticStatus(DiagnosticChannel::VoiceLink, "LINK WS CACHED");
             protocol_ = std::make_unique<WebsocketProtocol>();
         } else {
             ESP_LOGW(TAG, "OTA config unavailable; using %s MQTT config",
                      cached_protocol == CachedProtocolType::Mqtt
                          ? "cached" : "default");
+            display->SetDiagnosticStatus(DiagnosticChannel::VoiceLink,
+                cached_protocol == CachedProtocolType::Mqtt ? "LINK MQTT CACHED" : "LINK MQTT DEFAULT");
             protocol_ = std::make_unique<MqttProtocol>();
         }
     }
@@ -903,6 +918,7 @@ void Application::InitializeProtocol() {
                 RecordConversation();
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
                 ScheduleAudioChannelTask([this, display, message = std::string(text->valuestring)]() {
+                    if (!message.empty()) display->SetDiagnosticStatus(DiagnosticChannel::Voice, "VOICE STT OK");
                     guide_speech_text_ = message;
                     display->SetPreviewImage(nullptr);
                     display->SetContentFooter("");
@@ -2021,8 +2037,11 @@ void Application::HandleToggleChatEvent() {
 
 void Application::HandleStartListeningEvent() {
     auto state = GetDeviceState();
+    auto* display = Board::GetInstance().GetDisplay();
+    display->SetDiagnosticStatus(DiagnosticChannel::Voice, "PTT HELD");
 
     if (state == kDeviceStateActivating) {
+        display->SetDiagnostic(DiagnosticChannel::Voice, "VOICE ACTIVATING");
         SetDeviceState(kDeviceStateIdle);
         return;
     } else if (state == kDeviceStateWifiConfiguring) {
@@ -2034,6 +2053,7 @@ void Application::HandleStartListeningEvent() {
     if (!CanStartPersonalChat()) return;
     if (!protocol_) {
         ESP_LOGE(TAG, "Protocol not initialized");
+        display->SetDiagnostic(DiagnosticChannel::Voice, "VOICE NO PROTOCOL");
         return;
     }
 
@@ -2066,6 +2086,9 @@ void Application::HandleStopListeningEvent() {
     } else if (state == kDeviceStateListening) {
         if (protocol_) {
             protocol_->SendStopListening();
+        }
+        if (voice_transmit_ == VoiceTransmit::Waiting) {
+            Board::GetInstance().GetDisplay()->SetDiagnostic(DiagnosticChannel::Voice, "VOICE NO AUDIO TX");
         }
         SetDeviceState(kDeviceStateIdle);
     }
@@ -2152,6 +2175,8 @@ void Application::HandleStateChangedEvent() {
             }
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
+            voice_transmit_ = VoiceTransmit::Waiting;
+            display->SetDiagnosticStatus(DiagnosticChannel::Voice, "VOICE LISTENING");
 
             // Make sure the audio processor is running
             if (!audio_service_.IsAudioProcessorRunning()) {
@@ -2169,6 +2194,7 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
+            display->SetDiagnosticStatus(DiagnosticChannel::Voice, "VOICE TTS START");
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
@@ -2381,6 +2407,7 @@ bool Application::CanStartPersonalChat() {
     auto& board = Board::GetInstance();
     if (!board.RequiresUserBinding() || board.GetUserBinding().IsBound()) return true;
     ESP_LOGI(TAG, "Personal audio is waiting for a boot-scoped user binding");
+    board.GetDisplay()->SetDiagnostic(DiagnosticChannel::Voice, "VOICE BIND REQUIRED");
     board.GetDisplay()->ShowNotification("请关联当前用户");
     return false;
 }

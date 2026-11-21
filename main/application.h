@@ -209,6 +209,8 @@ private:
     bool startup_network_connected_pending_ = false;
     bool deferred_ota_check_needed_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
+    enum class VoiceTransmit { Waiting, Sent, Failed };
+    VoiceTransmit voice_transmit_ = VoiceTransmit::Waiting;
     bool role_switch_response_pending_ = false;
     bool role_switch_scan_active_ = false;
     bool role_switch_restore_pending_ = false;

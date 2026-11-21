@@ -1,9 +1,11 @@
 #include "mqtt_protocol.h"
 #include "board.h"
 #include "application.h"
+#include "display.h"
 #include "settings.h"
 
 #include <esp_log.h>
+#include <cstdio>
 #include <cstring>
 #include <arpa/inet.h>
 #include "assets/lang_config.h"
@@ -73,6 +75,7 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     if (endpoint.empty()) {
         ESP_LOGW(TAG, "MQTT endpoint is not specified");
         if (report_error) {
+            Board::GetInstance().GetDisplay()->SetDiagnostic(DiagnosticChannel::VoiceLink, "LINK MQTT NO ENDPOINT");
             SetError(Lang::Strings::SERVER_NOT_FOUND);
         }
         return false;
@@ -142,6 +145,9 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     }
     if (!mqtt_->Connect(broker_address, broker_port, client_id, username, password)) {
         ESP_LOGE(TAG, "Failed to connect to endpoint, code=%d", mqtt_->GetLastError());
+        char diagnostic[40];
+        std::snprintf(diagnostic, sizeof(diagnostic), "LINK MQTT ERR %d", mqtt_->GetLastError());
+        Board::GetInstance().GetDisplay()->SetDiagnostic(DiagnosticChannel::VoiceLink, diagnostic);
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         return false;
     }
@@ -206,6 +212,8 @@ void MqttProtocol::CloseAudioChannel() {
 }
 
 bool MqttProtocol::OpenAudioChannel() {
+    auto* display = Board::GetInstance().GetDisplay();
+    display->SetDiagnosticStatus(DiagnosticChannel::VoiceLink, "LINK MQTT CONNECT");
     if (mqtt_ == nullptr || !mqtt_->IsConnected()) {
         ESP_LOGI(TAG, "MQTT is not connected, try to connect now");
         if (!StartMqttClient(true)) {
@@ -219,13 +227,17 @@ bool MqttProtocol::OpenAudioChannel() {
 
     auto message = GetHelloMessage();
     if (!SendText(message)) {
+        display->SetDiagnostic(DiagnosticChannel::VoiceLink,
+            publish_topic_.empty() ? "LINK MQTT NO TOPIC" : "LINK MQTT SEND ERR");
         return false;
     }
+    display->SetDiagnosticStatus(DiagnosticChannel::VoiceLink, "LINK MQTT WAIT HELLO");
 
     // 等待服务器响应
     EventBits_t bits = xEventGroupWaitBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
     if (!(bits & MQTT_PROTOCOL_SERVER_HELLO_EVENT)) {
         ESP_LOGE(TAG, "Failed to receive server hello");
+        display->SetDiagnostic(DiagnosticChannel::VoiceLink, "LINK MQTT NO HELLO");
         SetError(Lang::Strings::SERVER_TIMEOUT);
         return false;
     }
@@ -279,7 +291,11 @@ bool MqttProtocol::OpenAudioChannel() {
         last_incoming_time_ = std::chrono::steady_clock::now();
     });
 
-    udp_->Connect(udp_server_, udp_port_);
+    if (udp_->Connect(udp_server_, udp_port_)) {
+        display->SetDiagnosticStatus(DiagnosticChannel::VoiceLink, "LINK MQTT UDP READY");
+    } else {
+        display->SetDiagnostic(DiagnosticChannel::VoiceLink, "LINK MQTT UDP ERR");
+    }
 
     if (on_audio_channel_opened_ != nullptr) {
         on_audio_channel_opened_();
