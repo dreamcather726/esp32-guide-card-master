@@ -50,6 +50,8 @@ I (...) BleBeacon: MAC=D9:62:62:00:00:0D RSSI=-83 dBm
 
 从 `2.1.37` 起，二维码进度条按 HTTP 已接收字节更新。服务器提供文件长度时显示百分比，长度未知时显示已接收字节数。写完后显示 `QR VERIFYING`，校验并保存成功后进入二维码页面。
 
+`2.1.38` 修复了精简版格式化函数造成的 `QR DOWNLOADING zu B`。`QR HTTPS CONNECT` 表示正在建立连接，`QR WAIT HTTP HEADER` 表示请求已发出、正在等服务器响应头，`QR HTTP READ ERR R1024` 表示收到 1024 字节后读取失败。
+
 写卡失败时，屏幕保留类似 `QR E5 R4096 W0 S109` 的信息。`R` 是网络已接收字节，`W` 是文件写入接口已接收字节，`S` 是捕获到的 SDMMC 错误码（正数按十六进制显示）。`S107` 表示超时，`S109` 表示 CRC 校验错误。完整文件保存成功以 `QR SAVED TF` 为准。
 
 本固件使用 `sdkconfig.jiuchuan-s3`。从旧版构建目录继续编译时，请同步启用该配置里的 NimBLE Observer 选项，或重新生成 sdkconfig。

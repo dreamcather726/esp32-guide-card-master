@@ -791,23 +791,29 @@ public:
 
     void SetQrDownloadProgress(size_t received, size_t total, bool verifying = false) {
         const bool indeterminate = total == 0 && !verifying;
-        const int progress = verifying ? 100 : (indeterminate ? 0 :
+        const int progress = verifying ? 100 : (indeterminate ? -1 :
             static_cast<int>(std::min<size_t>(100, received * 100 / total)));
         char text[40];
         if (verifying) {
             std::snprintf(text, sizeof(text), "QR VERIFYING");
         } else if (indeterminate) {
-            std::snprintf(text, sizeof(text), "QR DOWNLOADING %zu B", received);
+            // The board uses newlib-nano, which does not print the z modifier.
+            std::snprintf(text, sizeof(text), "QR DOWNLOADING %lu B",
+                          static_cast<unsigned long>(received));
         } else {
             std::snprintf(text, sizeof(text), "QR DOWNLOADING %d%%", progress);
         }
+        ShowQrProgress(text, progress);
+    }
+
+    void ShowQrProgress(const char* text, int progress = -1) {
         DisplayLockGuard lock(this);
         if (qr_progress_panel_ == nullptr && !CreateQrProgress()) return;
         SetDiagnosticStatus(DiagnosticChannel::Qr, text);
         if (std::strcmp(lv_label_get_text(qr_progress_label_), text) != 0) {
             lv_label_set_text(qr_progress_label_, text);
         }
-        if (indeterminate) {
+        if (progress < 0) {
             if (lv_bar_get_mode(qr_progress_bar_) == LV_BAR_MODE_RANGE) return;
             lv_bar_set_mode(qr_progress_bar_, LV_BAR_MODE_RANGE);
             lv_anim_t animation;
@@ -1352,7 +1358,8 @@ private:
     void ReportQrWriteError(std::string& error, int code, size_t received, size_t written) {
         const auto failure = sd_command_failure;
         char diagnostic[40];
-        std::snprintf(diagnostic, sizeof(diagnostic), "QR E%d R%zu W%zu", code, received, written);
+        std::snprintf(diagnostic, sizeof(diagnostic), "QR E%d R%lu W%lu", code,
+                      static_cast<unsigned long>(received), static_cast<unsigned long>(written));
         if (failure.code != ESP_OK) {
             const size_t len = std::strlen(diagnostic);
             if (failure.code < 0) {
@@ -1464,7 +1471,7 @@ private:
                                       std::unique_ptr<LvglImage>& image,
                                       std::string& error) {
         auto* qr_display = static_cast<NoEmojiSpiLcdDisplay*>(display_);
-        qr_display->SetQrDownloadProgress(0, 0);
+        qr_display->ShowQrProgress("QR HTTPS CONNECT");
         auto* network = GetNetwork();
         auto http = network ? network->CreateHttp(4) : nullptr;
         if (!http) {
@@ -1480,9 +1487,10 @@ private:
             http->Close();
             return TfDownloadResult::Retry;
         }
+        qr_display->ShowQrProgress("QR WAIT HTTP HEADER");
         const int status = http->GetStatusCode();
         if (status != 200) {
-            error = "QR HTTP " + std::to_string(status);
+            error = status <= 0 ? "QR HTTP HEADER ERROR" : "QR HTTP " + std::to_string(status);
             GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, error.c_str());
             http->Close();
             return TfDownloadResult::Retry;
@@ -1510,7 +1518,10 @@ private:
             const int read = http->Read(buffer, sizeof(buffer));
             if (read < 0) {
                 error = "QR HTTP read failed";
-                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR HTTP READ ERROR");
+                char diagnostic[40];
+                std::snprintf(diagnostic, sizeof(diagnostic), "QR HTTP READ ERR R%lu",
+                              static_cast<unsigned long>(received));
+                GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, diagnostic);
                 result = TfDownloadResult::Retry;
                 break;
             }

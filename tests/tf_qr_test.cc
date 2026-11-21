@@ -108,9 +108,14 @@ struct NoEmojiSpiLcdDisplay {
     int shows = 0;
     std::unique_ptr<LvglImage> image;
     std::string diagnostic;
+    std::vector<std::string> progress_stages;
     std::vector<size_t> received_progress;
     size_t progress_total = 0;
     bool progress_visible = false, progress_verified = false;
+    void ShowQrProgress(const char* text) {
+        progress_visible = true;
+        progress_stages.emplace_back(text);
+    }
     void SetQrDownloadProgress(size_t received, size_t total, bool verifying = false) {
         progress_visible = true;
         progress_total = total;
@@ -279,7 +284,9 @@ int main() {
     Run("QR progress tracks bytes received before verification", [](TestBoard& b) {
         b.network.responses[0].max_chunk = 10;
         b.EnsureTfStartupQr(); Ready(b);
-        Check(b.display.received_progress == std::vector<size_t>{0, 0, 10, 20, Jpeg().size()},
+        Check(b.display.progress_stages == std::vector<std::string>{"QR HTTPS CONNECT", "QR WAIT HTTP HEADER"},
+              "HTTPS and header wait stages were not reported");
+        Check(b.display.received_progress == std::vector<size_t>{0, 10, 20, Jpeg().size()},
               "progress did not follow HTTP reads");
         Check(b.display.progress_total == Jpeg().size() && b.display.progress_verified &&
               !b.display.progress_visible, "progress did not switch to verification and close");
@@ -288,7 +295,7 @@ int main() {
         b.network.responses[0].max_chunk = 10;
         writes_before_failure = 1;
         b.EnsureTfStartupQr();
-        Check(b.display.received_progress == std::vector<size_t>{0, 0, 10, 20} &&
+        Check(b.display.received_progress == std::vector<size_t>{0, 10, 20} &&
               !b.display.progress_visible && !b.display.progress_verified,
               "failed write left incorrect or visible progress");
         Check(b.display.diagnostic == "QR E28 R20 W10" && b.display.shows == 0,
@@ -376,13 +383,31 @@ int main() {
     Run("HTTP open failure retried", [](TestBoard& b) {
         b.network.responses = {Response{}, Response{}};
         b.network.responses[0].open = false;
+        on_delay = [&]() {
+            Check(b.display.diagnostic == "QR HTTPS ERROR" && !b.display.progress_visible &&
+                  b.display.progress_stages == std::vector<std::string>{"QR HTTPS CONNECT"},
+                  "HTTPS failure showed a downstream transfer stage");
+        };
+        b.EnsureTfStartupQr(); Ready(b, 2);
+    });
+    Run("unavailable HTTP headers produce their own diagnostic", [](TestBoard& b) {
+        b.network.responses = {Response{}, Response{}};
+        b.network.responses[0].status = -1;
+        on_delay = [&]() {
+            Check(b.display.diagnostic == "QR HTTP HEADER ERROR" && !b.display.progress_visible &&
+                  b.display.received_progress.empty(), "header failure looked like a stalled transfer");
+        };
         b.EnsureTfStartupQr(); Ready(b, 2);
     });
     Run("partial body and size mismatch retried", [](TestBoard& b) {
         b.network.responses = {Response{}, Response{}, Response{}};
         b.network.responses[0].read_error_after = 3;
         b.network.responses[1].expected = 100;
+        std::vector<std::string> failures;
+        on_delay = [&]() { failures.push_back(b.display.diagnostic); };
         b.EnsureTfStartupQr(); Ready(b, 3);
+        Check(failures == std::vector<std::string>{"QR HTTP READ ERR R3", "QR HTTP INCOMPLETE"},
+              "body failure lost the received byte count");
     });
     Run("invalid download never replaces existing file", [](TestBoard& b) {
         Write(kPath, "old invalid JPEG");

@@ -130,6 +130,10 @@ int main() {
     Check(std::strcmp(lv_label_get_text(board.diagnostic_label_), "USB NO DEVICE\nQR WAIT IMEI") == 0,
           "the USB and QR explanations should both be visible");
     Check(pixel(7, 112) == 0, "diagnostics should render above the bottom status icons");
+    board.ShowQrProgress("QR WAIT HTTP HEADER");
+    Check(lv_bar_get_mode(board.qr_progress_bar_) == LV_BAR_MODE_RANGE &&
+          std::strcmp(lv_label_get_text(board.qr_progress_label_), "QR WAIT HTTP HEADER") == 0,
+          "header wait should have its own indeterminate progress");
     board.SetQrDownloadProgress(10, 40);
     lv_obj_update_layout(board.qr_progress_panel_);
     Check(lv_bar_get_value(board.qr_progress_bar_) == 25, "progress bar value did not update");
@@ -140,9 +144,9 @@ int main() {
     Check(std::strcmp(lv_label_get_text(board.qr_progress_label_), "QR VERIFYING") == 0,
           "verification label missing");
     board.HideQrDownloadProgress();
-    board.SetQrDownloadProgress(1024, 0);
+    board.SetQrDownloadProgress(524288, 0);
     Check(lv_bar_get_mode(board.qr_progress_bar_) == LV_BAR_MODE_RANGE &&
-          std::strcmp(lv_label_get_text(board.qr_progress_label_), "QR DOWNLOADING 1024 B") == 0,
+          std::strcmp(lv_label_get_text(board.qr_progress_label_), "QR DOWNLOADING 524288 B") == 0,
           "unknown size should show transferred bytes and an indeterminate bar");
     board.HideQrDownloadProgress();
     Check(board.qr_progress_panel_ == nullptr, "progress panel did not close");
