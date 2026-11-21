@@ -56,28 +56,40 @@
 #define BOARD_TAG "JiuchuanDevBoard"
 
 namespace {
+struct SdSectorFailure {
+    esp_err_t code = ESP_OK;
+    bool write = false;
+};
+
+// Keep the SDK result before FatFs converts it to a generic disk error.
+// Each task keeps its own result so an audio read cannot overwrite a QR write.
+thread_local SdSectorFailure sd_sector_failure;
+}  // namespace
+
+extern "C" esp_err_t __real_sdmmc_read_sectors(sdmmc_card_t*, void*, size_t, size_t);
+extern "C" esp_err_t __real_sdmmc_write_sectors(sdmmc_card_t*, const void*, size_t, size_t);
+
+extern "C" esp_err_t __wrap_sdmmc_read_sectors(sdmmc_card_t* card, void* dst,
+                                             size_t sector, size_t count) {
+    const auto code = __real_sdmmc_read_sectors(card, dst, sector, count);
+    if (code != ESP_OK) sd_sector_failure = {code, false};
+    return code;
+}
+
+extern "C" esp_err_t __wrap_sdmmc_write_sectors(sdmmc_card_t* card, const void* src,
+                                              size_t sector, size_t count) {
+    const auto code = __real_sdmmc_write_sectors(card, src, sector, count);
+    if (code != ESP_OK) sd_sector_failure = {code, true};
+    return code;
+}
+
+namespace {
 constexpr uint32_t kModemRetryMarker = 0x4d4c3337;
 RTC_NOINIT_ATTR uint32_t modem_retry_marker;
 
 bool UseEarlyUsbPowerOnRetry() {
     if (esp_reset_reason() != ESP_RST_SW) modem_retry_marker = 0;
     return modem_retry_marker == kModemRetryMarker;
-}
-
-struct SdCommandFailure {
-    uint32_t command = 0;
-    esp_err_t code = ESP_OK;
-};
-
-// FAT reports EIO for several driver errors. Keep the original result on
-// the calling task so another TF reader cannot overwrite this write's error.
-thread_local SdCommandFailure sd_command_failure;
-
-esp_err_t TrackSdmmcTransaction(int slot, sdmmc_command_t* command) {
-    const auto result = sdmmc_host_do_transaction(slot, command);
-    const auto code = result == ESP_OK ? command->error : result;
-    if (code != ESP_OK) sd_command_failure = {command->opcode, code};
-    return result;
 }
 
 #if defined(CONFIG_BT_NIMBLE_ROLE_OBSERVER) && !defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
@@ -1061,7 +1073,6 @@ private:
 
     void InitializeSdCard() {
         sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-        host.do_transaction = TrackSdmmcTransaction;
         sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
         slot_config.clk = SD_PIN_CLK;
         slot_config.cmd = SD_PIN_CMD;
@@ -1356,21 +1367,24 @@ private:
     }
 
     void ReportQrWriteError(std::string& error, int code, size_t received, size_t written) {
-        const auto failure = sd_command_failure;
+        const auto failure = sd_sector_failure;
         char diagnostic[40];
         std::snprintf(diagnostic, sizeof(diagnostic), "QR E%d R%lu W%lu", code,
                       static_cast<unsigned long>(received), static_cast<unsigned long>(written));
+        const size_t len = std::strlen(diagnostic);
+        if (failure.code == ESP_OK) {
+            std::snprintf(diagnostic + len, sizeof(diagnostic) - len, " S--");
+        } else if (failure.code < 0) {
+            std::snprintf(diagnostic + len, sizeof(diagnostic) - len, " S%d", failure.code);
+        } else {
+            std::snprintf(diagnostic + len, sizeof(diagnostic) - len, " S%X",
+                          static_cast<unsigned>(failure.code));
+        }
         if (failure.code != ESP_OK) {
-            const size_t len = std::strlen(diagnostic);
-            if (failure.code < 0) {
-                std::snprintf(diagnostic + len, sizeof(diagnostic) - len, " S%d", failure.code);
-            } else {
-                std::snprintf(diagnostic + len, sizeof(diagnostic) - len, " S%X",
-                              static_cast<unsigned>(failure.code));
-            }
-            ESP_LOGE(BOARD_TAG, "[TF_QR] SDMMC CMD%u failed: %s (0x%X)",
-                     static_cast<unsigned>(failure.command), esp_err_to_name(failure.code),
-                     static_cast<unsigned>(failure.code));
+            ESP_LOGE(BOARD_TAG, "[TF_QR] SD sector %s failed: %s (0x%X), dma_largest=%u",
+                     failure.write ? "write" : "read", esp_err_to_name(failure.code),
+                     static_cast<unsigned>(failure.code),
+                     static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL)));
         }
         error = diagnostic;
         GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, diagnostic);
@@ -1536,7 +1550,7 @@ private:
                 break;
             }
             qr_display->SetQrDownloadProgress(received, expected_size);
-            sd_command_failure = {};
+            sd_sector_failure = {};
             errno = 0;
             const size_t stored = std::fwrite(buffer, 1, static_cast<size_t>(read), file);
             written += stored;

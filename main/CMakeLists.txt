@@ -750,6 +750,11 @@ target_compile_definitions(${COMPONENT_LIB}
                     PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
                     )
 
+if(CONFIG_BOARD_TYPE_JIUCHUAN)
+    target_link_options(${COMPONENT_LIB} INTERFACE
+        "-Wl,--wrap=sdmmc_read_sectors" "-Wl,--wrap=sdmmc_write_sectors")
+endif()
+
 if(CONFIG_BOARD_TYPE_JIUCHUAN AND NOT "${JIUCHUAN_STARTUP_QR_IMEI}" STREQUAL "")
     string(LENGTH "${JIUCHUAN_STARTUP_QR_IMEI}" qr_imei_length)
     if(NOT qr_imei_length EQUAL 15 OR NOT JIUCHUAN_STARTUP_QR_IMEI MATCHES "^[0-9]+$")
