@@ -14,7 +14,6 @@ def main():
     board = (ROOT / "main/boards/common/rndis_board.cc").read_text(encoding="utf-8")
     # These exact, contiguous definitions are exercised without copying their logic.
     sections = [
-        ("std::string RndisBoard::GetImei()", "bool RndisBoard::OpenAndProbeUsbAtInterface("),
         ("bool RndisBoard::DetectAndDialUsbAt()", "void RndisBoard::NetworkTaskEntry("),
         ("void RndisBoard::NetworkTask()", "static constexpr const char* kPrimaryDnsServer"),
     ]

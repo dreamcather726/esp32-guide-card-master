@@ -1,10 +1,8 @@
-// Production worker/identity methods are included by run_rndis_host_tests.py.
-// Only the USB, RTOS and NVS boundaries are simulated here.
+// Production worker methods are included by run_rndis_host_tests.py.
+// Only the USB and RTOS boundaries are simulated here.
 #include "ml307_at.h"
-#include "../main/display/diagnostic_channel.h"
 #include <functional>
 #include <iostream>
-#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -31,15 +29,10 @@ struct WorkerIdle {};
 struct Environment {
     EventBits_t bits = EVENT_USB_DEVICE_BIT | EVENT_GOT_IP_BIT;
     int waits = 0;
-    unsigned probes = 0, probe_failures = 0, imei_failures = 0;
-    bool cellular = true;
-    std::string csq_reply = "\r\n+CSQ: 28,99\r\nOK\r\n";
-    unsigned connecting = 0;
-    unsigned detecting = 0;
+    unsigned probes = 0, probe_failures = 0;
+    unsigned enumeration_timeouts = 0;
     std::function<void()> on_missing_modem;
-    std::map<std::string, std::string> nvs;
     std::vector<std::string> commands;
-    std::string usb_diagnostic, network_diagnostic;
     std::vector<uint32_t> retry_delays;
     std::function<void(EventBits_t, uint32_t)> on_wait;
     std::function<void(const std::string&)> on_command;
@@ -60,12 +53,6 @@ EventBits_t xEventGroupWaitBits(void*, EventBits_t mask, bool clear, bool, uint3
 }
 void vTaskDelay(uint32_t) {}
 bool ParseCregRegistration(const std::string&, int& status) { status = 1; return true; }
-struct Settings {
-    Settings(const char*, bool) {}
-    std::string GetString(const std::string& key) { return env->nvs[key]; }
-    void SetString(const std::string& key, const std::string& value) { env->nvs[key] = value; }
-};
-enum class NetworkEvent { Connecting, ModemDetecting };
 class RndisBoard {
 public:
     std::mutex usb_state_mutex_;
@@ -74,23 +61,10 @@ public:
     bool usb_at_dial_succeeded_ = false;
     void* usb_at_port_ = nullptr;
     void* s_event_group = nullptr;
-    std::string imei_;
-    bool monitor_signal_ = false;
-    int cellular_csq_ = -1;
-    int GetCellularSignal() const { return cellular_csq_; }
-    bool IsCellularNetwork() const { return env->cellular; }
     bool IsNetworkReady() const { return (env->bits & EVENT_GOT_IP_BIT) != 0; }
-    bool HasUsbModem() const { return usb_device_addr_ != 0; }
-    void SetNetworkDiagnostic(DiagnosticChannel channel, const char* message, bool = true) {
-        (channel == DiagnosticChannel::Usb ? env->usb_diagnostic : env->network_diagnostic) = message;
-    }
-    void OnNetworkEvent(NetworkEvent event, const std::string& = "") {
-        if (event == NetworkEvent::Connecting) {
-            ++env->connecting;
-        } else {
-            ++env->detecting;
-            if (env->on_missing_modem) env->on_missing_modem();
-        }
+    void OnEnumerationTimeout() {
+        ++env->enumeration_timeouts;
+        if (env->on_missing_modem) env->on_missing_modem();
     }
     bool EnsureUsbAtControlPort(uint32_t session) {
         ++env->probes;
@@ -100,23 +74,13 @@ public:
         return true;
     }
     bool SendUsbAtCommand(const std::string& cmd, std::string& response, uint32_t, uint32_t session) {
-        env->commands.push_back(cmd);
         response.clear();
         if (session != usb_session_ || !usb_at_port_) return false;
+        env->commands.push_back(cmd);
         if (env->on_command) env->on_command(cmd);
-        if (cmd == "AT+CSQ") {
-            response = env->csq_reply;
-            return !response.empty();
-        } else if (cmd == "AT+CGSN=1" || cmd == "AT+CGSN" || cmd == "AT+GSN") {
-            if (env->imei_failures) { --env->imei_failures; return false; }
-            response = "\r\n864479086486322\r\nOK\r\n";
-        } else {
-            response = "\r\nOK\r\n";
-        }
-        return true;
+        response = "\r\nOK\r\n";
+        return session == usb_session_ && usb_at_port_;
     }
-    std::string GetImei();
-    bool QueryAndCacheImei(uint32_t session);
     bool DetectAndDialUsbAt();
     void NetworkTask();
 };
@@ -142,12 +106,9 @@ int main() {
         ++passed;
         std::cout << "PASS " << name << '\n';
     };
-    test("warm modem, blank NVS, IP already ready", [](auto& board) {
+    test("warm modem already has IP", [](auto& board) {
         Run(board);
-        Check(board.GetImei() == "864479086486322", "IMEI missing");
-        Check(env->nvs["imei"] == board.GetImei(), "identity not persisted");
-        Check(Calls("AT+MDIALUP=1,1") == 0 && Calls("AT+CPIN?") == 0, "online modem was redialed");
-        Check(env->connecting == 0, "ready UI regressed");
+        Check(env->probes == 0 && env->commands.empty(), "online modem was probed or redialed");
     });
     test("IP arrives during startup grace", [](auto& board) {
         env->bits = EVENT_USB_DEVICE_BIT;
@@ -155,103 +116,44 @@ int main() {
             if (mask == (EVENT_GOT_IP_BIT | EVENT_USB_GONE_BIT)) env->bits |= EVENT_GOT_IP_BIT;
         };
         Run(board);
-        Check(!board.GetImei().empty() && Calls("AT+MDIALUP=1,1") == 0, "grace path skipped identity");
+        Check(env->probes == 0 && env->commands.empty(), "grace path redialed");
     });
-    test("AT probe fails then recovers without another USB event", [](auto& board) {
-        env->probe_failures = 2;
-        Run(board);
-        Check(!board.GetImei().empty(), "retry did not obtain identity");
-        Check((env->retry_delays == std::vector<uint32_t>{2000, 4000}), "wrong probe backoff");
-        Check(Calls("AT+MDIALUP=1,1") == 0, "probe retry redialed");
-    });
-    test("IMEI fails then recovers without another USB event", [](auto& board) {
-        env->imei_failures = 3;
-        Run(board);
-        Check(!board.GetImei().empty(), "IMEI retry missing");
-        Check((env->retry_delays == std::vector<uint32_t>{2000}), "wrong IMEI backoff");
-    });
-    test("cold modem follows normal dial path", [](auto& board) {
+    test("cold modem dials and gets IP", [](auto& board) {
         env->bits = EVENT_USB_DEVICE_BIT;
         env->on_command = [](const auto& command) {
             if (command == "AT+MDIALUP=1,1") env->bits |= EVENT_GOT_IP_BIT;
         };
         Run(board);
-        Check(Calls("AT+MDIALUP=1,1") == 1 && !board.GetImei().empty(), "cold start failed");
+        Check(Calls("AT+MDIALUP=1,1") == 1 && board.IsNetworkReady(), "cold start failed");
     });
-    test("signal is sampled before IMEI, DHCP and MQTT", [](auto& board) {
-        board.monitor_signal_ = true;
+    test("AT probe retries without another USB event", [](auto& board) {
         env->bits = EVENT_USB_DEVICE_BIT;
-        env->imei_failures = 3;
-        env->on_command = [&](const std::string& command) {
-            if (command == "AT+CGSN=1" && Calls(command) == 1) {
-                Check(!board.IsNetworkReady() && board.GetImei().empty(), "test skipped early startup");
-                Check(board.GetCellularSignal() == 28, "early CSQ not yet available");
-                throw WorkerIdle{};
-            }
+        env->probe_failures = 2;
+        env->on_command = [](const auto& command) {
+            if (command == "AT+MDIALUP=1,1") env->bits |= EVENT_GOT_IP_BIT;
         };
         Run(board);
-        Check(Calls("AT+CSQ") == 1, "startup never sampled CSQ");
+        Check((env->retry_delays == std::vector<uint32_t>{2000, 4000}), "wrong probe backoff");
+        Check(env->probes == 3 && board.IsNetworkReady(), "probe retry did not recover");
     });
-    test("online CSQ follows signal changes and retries failures", [](auto& board) {
-        board.monitor_signal_ = true;
-        env->on_wait = [&](auto, auto wait) {
-            const auto sample = Calls("AT+CSQ");
-            if (sample == 1) {
-                Check(board.GetCellularSignal() == 28 && wait == 10000, "strong signal not sampled");
-                env->csq_reply = "+CSQ: 6,99\r\nOK\r\n";
-            } else if (sample == 2) {
-                Check(board.GetCellularSignal() == 6 && wait == 10000, "weak signal not updated");
-                env->csq_reply.clear();
-            } else if (sample == 3) {
-                Check(board.GetCellularSignal() == -1 && wait == 5000, "failed read did not clear and retry");
-                env->csq_reply = "+CSQ: 18,99\r\nOK\r\n";
-            } else {
-                Check(sample == 4 && board.GetCellularSignal() == 18, "signal did not recover");
-                throw WorkerIdle{};
-            }
+    test("dial accepted without DHCP is retried after 30 seconds", [](auto& board) {
+        env->bits = EVENT_USB_DEVICE_BIT;
+        env->on_command = [](const auto& command) {
+            if (command == "AT+MDIALUP=1,1" && Calls(command) == 2) env->bits |= EVENT_GOT_IP_BIT;
         };
         Run(board);
-        Check(Calls("AT+CGSN=1") == 1 && Calls("AT+MDIALUP=1,1") == 0,
-              "signal polling interfered with the online connection");
+        Check(Calls("AT+MDIALUP=1,1") == 2, "missing DHCP recovery");
+        Check((env->retry_delays == std::vector<uint32_t>{30000}), "wrong DHCP retry interval");
     });
-    test("cached dial flag does not skip missing identity", [](auto& board) {
-        board.usb_at_dial_succeeded_ = true;
-        Run(board);
-        Check(!board.GetImei().empty(), "dial flag suppressed identity query");
-    });
-    test("already-read identity is not queried repeatedly", [](auto& board) {
-        board.imei_ = "864479086486322";
-        Run(board);
-        Check(env->commands.empty(), "healthy session generated commands");
-    });
-    test("old modem NVS is withheld in cellular mode", [](auto& board) {
-        env->nvs["imei"] = "111111111111111";
-        Check(board.GetImei().empty(), "stale identity exposed");
-        Run(board);
-        Check(board.GetImei() == "864479086486322", "identity not refreshed");
-    });
-    test("WiFi cached identity remains supported", [](auto& board) {
-        env->cellular = false;
-        env->nvs["imei"] = "864479086486322";
-        Check(board.GetImei() == "864479086486322", "WiFi fallback lost");
-        env->nvs["imei"] = "invalid";
-        Check(board.GetImei().empty(), "invalid WiFi identity accepted");
-    });
-    test("re-enumeration rejects an old IMEI response", [](auto& board) {
-        board.usb_at_port_ = &board;
-        env->on_command = [&](const auto&) { ++board.usb_session_; };
-        Check(!board.QueryAndCacheImei(1), "stale response accepted");
-        Check(board.imei_.empty() && env->nvs.empty(), "stale response persisted");
-    });
-    test("no attached USB device stays idle", [](auto& board) {
+    test("no attached USB device reports timeout and stays idle", [](auto& board) {
         board.usb_device_addr_ = 0;
         env->bits = 0;
         Run(board);
         Check(env->commands.empty() && env->probes == 0, "probing absent device");
-        Check(env->detecting == 1 && env->retry_delays == std::vector<uint32_t>{12000},
-              "startup did not report a missing modem once");
+        Check(env->enumeration_timeouts == 1 && env->retry_delays == std::vector<uint32_t>{12000},
+              "startup did not report the missing modem once");
     });
-    test("late enumeration recovers after the timeout", [](auto& board) {
+    test("late enumeration recovers after timeout", [](auto& board) {
         board.usb_device_addr_ = 0;
         env->bits = 0;
         env->on_missing_modem = [&]() {
@@ -259,17 +161,16 @@ int main() {
             env->bits = EVENT_USB_DEVICE_BIT | EVENT_GOT_IP_BIT;
         };
         Run(board);
-        Check(env->detecting == 1 && !board.GetImei().empty(), "late device did not recover");
-        Check(Calls("AT+MDIALUP=1,1") == 0, "late warm modem was redialed");
+        Check(env->enumeration_timeouts == 1 && board.IsNetworkReady(), "late device did not recover");
+        Check(env->commands.empty(), "late warm modem was redialed");
     });
-    test("dial accepted but no IP is retried after 30 seconds", [](auto& board) {
-        env->bits = EVENT_USB_DEVICE_BIT;
-        env->on_command = [](const auto& command) {
-            if (command == "AT+MDIALUP=1,1" && Calls(command) == 2) env->bits |= EVENT_GOT_IP_BIT;
+    test("USB re-enumeration cancels an old dial attempt", [](auto& board) {
+        env->bits = 0;
+        env->on_command = [&](const auto& command) {
+            if (command == "AT+CPIN?") ++board.usb_session_;
         };
-        Run(board);
-        Check(Calls("AT+MDIALUP=1,1") == 2, "missing DHCP recovery");
-        Check((env->retry_delays == std::vector<uint32_t>{30000}), "unbounded dial loop");
+        Check(!board.DetectAndDialUsbAt(), "stale dial attempt succeeded");
+        Check(Calls("AT+MDIALUP=1,1") == 0 && !board.usb_at_dial_succeeded_, "stale session dialed");
     });
     std::cout << passed << " production flow scenarios passed\n";
 }

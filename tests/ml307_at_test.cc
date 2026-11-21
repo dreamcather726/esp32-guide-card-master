@@ -24,27 +24,6 @@ int main() {
     assert((ControlCandidates(duplicate, 2) == std::vector<uint8_t>{2}));
     assert(ControlCandidates(nullptr, 0).empty());
 
-    assert(IsImei("864479086486322"));
-    assert(!IsImei("864479086486322s3"));
-    assert(!IsImei("000000000000000"));
-    assert(!IsImei("86447908648632"));
-    assert(!IsImei("8644790864863221"));
-    assert(!IsImei("864479O86486322"));
-    assert(ExtractImei("AT+GSN\r\n864479086486322\r\nOK\r\n") == "864479086486322");
-    assert(ExtractImei("\r\n+CGSN: \"864479086486322\"\r\nOK\r\n") == "864479086486322");
-    assert(ExtractImei("+GSN: 864479086486322\nOK\n") == "864479086486322");
-    assert(ExtractImei("+CGSN:864479086486322\r\n") == "864479086486322");
-    assert(ExtractImei("\r\n+OTHER: 864479086486322\r\nOK\r\n").empty());
-    assert(ExtractImei("ERROR\r\n").empty());
-    assert(ExtractImei("8644790864863221\r\nOK\r\n").empty());
-    assert(ExtractImei("000000000000000\r\nOK\r\n").empty());
-
-    assert(ParseCsq("AT+CSQ\r\n+CSQ: 27,99\r\nOK\r\n") == 27);
-    assert(ParseCsq("+CSQ: 0,99") == 0);
-    assert(ParseCsq("+CSQ: 99,99") == -1);
-    assert(ParseCsq("+CSQ: 12junk,99") == -1);
-    assert(ParseCsq("+URC: +CSQ: 28,99") == -1);
-
     assert(ParseReply("\r\nOK\r\n") == Reply::Ok);
     assert(ParseReply("AT\r\nO") == Reply::Pending);
     assert(ParseReply("AT\r\nOK") == Reply::Pending);
@@ -59,5 +38,5 @@ int main() {
     assert(RetryDelayMs(3) == 16000);
     assert(RetryDelayMs(4) == 30000);
     assert(RetryDelayMs(100000) == 30000);
-    std::cout << "ML307 AT helper: 40 checks passed\n";
+    std::cout << "ML307 AT helper checks passed\n";
 }

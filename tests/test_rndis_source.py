@@ -14,28 +14,28 @@ class RndisIntegrationTests(unittest.TestCase):
         self.board = (ROOT / "main/boards/common/rndis_board.cc").read_text(encoding="utf-8")
         self.driver = (ROOT / "components/iot_usbh_cdc/iot_usbh_cdc.c").read_text(encoding="utf-8")
 
-    def test_metadata_precedes_network_ready_shortcut(self):
-        maintain = body(self.board, "bool RndisBoard::DetectAndDialUsbAt()", "void RndisBoard::NetworkTaskEntry(")
-        self.assertLess(maintain.index("QueryAndCacheImei(session)"), maintain.index("if (IsNetworkReady())"))
-        self.assertLess(maintain.index("QueryAndCacheImei(session)"), maintain.index("if (dial_already_accepted)"))
-
-    def test_no_blocking_identity_read_in_start_or_ip_callback(self):
+    def test_starts_rndis_before_processing_usb_events(self):
         start = body(self.board, "void RndisBoard::StartNetwork()", "bool RndisBoard::InitializeUsbCdcHost()")
-        event = body(self.board, "void RndisBoard::iot_event_handle(", "void RndisBoard::OnNetworkEvent(")
-        self.assertNotIn("QueryAndCacheImei", start + event)
-        self.assertIn("EVENT_GOT_IP_BIT | EVENT_USB_MAINTENANCE_BIT", event)
+        self.assertLess(start.index("InitializeUsbCdcHost()"), start.index("InstallRndis()"))
+        self.assertLess(start.index("InstallRndis()"), start.index("usbh_cdc_start_event_handling()"))
 
-    def test_enumeration_and_disconnect_invalidate_identity(self):
+    def test_sets_dns_before_reporting_network_ready(self):
+        event = body(self.board, "void RndisBoard::iot_event_handle(", "bool RndisBoard::InstallRndis()")
+        self.assertLess(event.index("ConfigureRndisDns"), event.index("EVENT_GOT_IP_BIT | EVENT_USB_MAINTENANCE_BIT"))
+        self.assertIn("IP_EVENT_ETH_LOST_IP", event)
+        self.assertIn("usb_at_dial_succeeded_ = false", event)
+
+    def test_enumeration_and_disconnect_invalidate_usb_session(self):
         connected = body(self.board, "void RndisBoard::HandleUsbDeviceConnected(", "void RndisBoard::HandleUsbDeviceDisconnected(")
         gone = body(self.board, "void RndisBoard::HandleUsbDeviceDisconnected(", "void RndisBoard::UsbAtReceiveCallback(")
         for code in (connected, gone):
             self.assertIn("++usb_session_", code)
-            self.assertIn("imei_.clear()", code)
             self.assertIn("usb_at_port_ = nullptr", code)
+            self.assertIn("usb_at_dial_succeeded_ = false", code)
 
     def test_receive_and_send_are_session_scoped(self):
         rx = body(self.board, "void RndisBoard::UsbAtReceiveCallback(", "void RndisBoard::UsbAtClosedCallback(")
-        tx = body(self.board, "bool RndisBoard::SendUsbAtCommand(", "bool RndisBoard::ExecuteUsbAtCommand(")
+        tx = body(self.board, "bool RndisBoard::SendUsbAtCommand(", "bool RndisBoard::OpenAndProbeUsbAtInterface(")
         self.assertLess(rx.index("usb_at_port_ != port_handle"), rx.index("usbh_cdc_read_bytes"))
         self.assertLess(tx.index("std::unique_lock<std::mutex> state_lock"), tx.index("usbh_cdc_write_bytes"))
         self.assertLess(tx.index("usbh_cdc_write_bytes"), tx.index("state_lock.unlock()"))
