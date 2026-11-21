@@ -27,6 +27,7 @@ static std::vector<uint32_t> delays;
 static std::function<void()> on_delay;
 static bool fail_sync = false, fail_write = false, fail_rename = false;
 static int writes_before_failure = -1;
+static int simulated_sd_error = 0;
 static int no_memory_decodes = 0;
 static size_t decoded_width = 300;
 static int decode_calls = 0;
@@ -51,7 +52,23 @@ static int TestFsync(int fd) {
     if (fail_sync) { errno = EIO; return -1; }
     return ::fsync(fd);
 }
+using esp_err_t = int;
+constexpr int ESP_OK = 0, ESP_FAIL = -1, ESP_ERR_NO_MEM = -2;
+struct sdmmc_command_t { uint32_t opcode; esp_err_t error; };
+static esp_err_t sdmmc_host_do_transaction(int, sdmmc_command_t* command) {
+    command->error = simulated_sd_error;
+    return ESP_OK;
+}
+#include "tf_qr_sd_trace.inc"
+
 static size_t TestWrite(const void* data, size_t size, size_t count, FILE* file) {
+    if (simulated_sd_error != ESP_OK) {
+        sdmmc_command_t command{24, ESP_OK};
+        Check(TrackSdmmcTransaction(0, &command) == ESP_OK && command.error == simulated_sd_error,
+              "SD trace changed the driver's result");
+        errno = EIO;
+        return std::fwrite(data, size, std::min<size_t>(3, count), file);
+    }
     if (fail_write || writes_before_failure == 0) { errno = ENOSPC; return 0; }
     if (writes_before_failure > 0) --writes_before_failure;
     return std::fwrite(data, size, count, file);
@@ -67,9 +84,7 @@ static std::string Jpeg(uint16_t width = 300, uint16_t height = 300) {
     return {reinterpret_cast<const char*>(bytes), sizeof(bytes)};
 }
 constexpr int MALLOC_CAP_SPIRAM = 1, MALLOC_CAP_8BIT = 2;
-constexpr int ESP_OK = 0, ESP_FAIL = -1, ESP_ERR_NO_MEM = -2;
 constexpr int LV_COLOR_FORMAT_RGB565 = 1;
-using esp_err_t = int;
 static const char* esp_err_to_name(int result) { return result == ESP_ERR_NO_MEM ? "NO_MEM" : "FAIL"; }
 static void* heap_caps_malloc(size_t size, int) { return std::malloc(size); }
 static void heap_caps_free(void* data) { std::free(data); }
@@ -93,14 +108,14 @@ struct NoEmojiSpiLcdDisplay {
     int shows = 0;
     std::unique_ptr<LvglImage> image;
     std::string diagnostic;
-    std::vector<size_t> written_progress;
+    std::vector<size_t> received_progress;
     size_t progress_total = 0;
     bool progress_visible = false, progress_verified = false;
-    void SetQrDownloadProgress(size_t written, size_t total, bool verifying = false) {
+    void SetQrDownloadProgress(size_t received, size_t total, bool verifying = false) {
         progress_visible = true;
         progress_total = total;
         if (verifying) progress_verified = true;
-        else written_progress.push_back(written);
+        else received_progress.push_back(received);
     }
     void HideQrDownloadProgress() { progress_visible = false; }
     void SetDiagnostic(DiagnosticChannel channel, const char* value) {
@@ -247,6 +262,7 @@ static void Run(const char* name, const std::function<void(TestBoard&)>& test) {
     fs::create_directory("sdcard");
     delays.clear(); on_delay = {}; fail_sync = fail_write = fail_rename = false;
     writes_before_failure = -1;
+    simulated_sd_error = ESP_OK;
     no_memory_decodes = 0; decoded_width = 300; decode_calls = 0;
     cached_imei.clear();
     configured_imei.clear();
@@ -260,23 +276,30 @@ int main() {
         b.EnsureTfStartupQr(); Ready(b);
         Check(!fs::exists(kPartial), "partial file remains");
     });
-    Run("QR progress tracks successful TF writes before verification", [](TestBoard& b) {
+    Run("QR progress tracks bytes received before verification", [](TestBoard& b) {
         b.network.responses[0].max_chunk = 10;
         b.EnsureTfStartupQr(); Ready(b);
-        Check(b.display.written_progress == std::vector<size_t>{0, 10, 20, Jpeg().size()},
-              "progress did not follow written bytes");
+        Check(b.display.received_progress == std::vector<size_t>{0, 0, 10, 20, Jpeg().size()},
+              "progress did not follow HTTP reads");
         Check(b.display.progress_total == Jpeg().size() && b.display.progress_verified &&
               !b.display.progress_visible, "progress did not switch to verification and close");
     });
-    Run("QR write failure hides progress without counting the failed chunk", [](TestBoard& b) {
+    Run("QR write failure preserves received and stored counts separately", [](TestBoard& b) {
         b.network.responses[0].max_chunk = 10;
         writes_before_failure = 1;
         b.EnsureTfStartupQr();
-        Check(b.display.written_progress == std::vector<size_t>{0, 10} &&
+        Check(b.display.received_progress == std::vector<size_t>{0, 0, 10, 20} &&
               !b.display.progress_visible && !b.display.progress_verified,
               "failed write left incorrect or visible progress");
-        Check(b.display.diagnostic.rfind("QR TF WRITE E", 0) == 0 && b.display.shows == 0,
-              "progress hid the write failure");
+        Check(b.display.diagnostic == "QR E28 R20 W10" && b.display.shows == 0,
+              "write failure lost the progress snapshot");
+    });
+    Run("QR partial write preserves SDMMC CRC status and byte counts", [](TestBoard& b) {
+        b.network.responses[0].max_chunk = 10;
+        simulated_sd_error = 0x109;
+        b.EnsureTfStartupQr();
+        Check(b.display.diagnostic == "QR E5 R10 W3 S109" && !b.display.progress_visible &&
+              !fs::exists(kPath) && !fs::exists(kPartial), "SDMMC write detail was lost");
     });
     Run("cached QR displayed offline before USB IP readiness", [](TestBoard& b) {
         Write(kPath, Jpeg()); b.ready = false; b.network_present = false;
@@ -447,10 +470,9 @@ int main() {
             b.EnsureTfStartupQr();
             Check(!b.storage_errors.empty() && b.display.shows == 0, "storage failure ignored");
             Check(!fs::exists(kPartial) && !fs::exists(kPath), "failed download committed");
-            const char* operation = failure == 0 ? "WRITE" : (failure == 1 ? "SYNC" : "SAVE");
-            const int code = failure == 0 ? ENOSPC : EIO;
-            Check(b.display.diagnostic == std::string("QR TF ") + operation + " E" + std::to_string(code),
-                  "TF failure stage or error number was lost");
+            const auto expected = failure == 0 ? "QR E28 R" + std::to_string(Jpeg().size()) + " W0"
+                : failure == 1 ? std::string("QR TF SYNC E5") : std::string("QR TF SAVE E5");
+            Check(b.display.diagnostic == expected, "TF failure stage or error number was lost");
         });
     }
     std::cout << tests << " TF QR worker scenarios passed\n";

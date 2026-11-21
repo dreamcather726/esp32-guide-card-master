@@ -142,10 +142,13 @@ int main() {
     board.HideQrDownloadProgress();
     board.SetQrDownloadProgress(1024, 0);
     Check(lv_bar_get_mode(board.qr_progress_bar_) == LV_BAR_MODE_RANGE &&
-          std::strcmp(lv_label_get_text(board.qr_progress_label_), "QR DOWN 1024 B") == 0,
+          std::strcmp(lv_label_get_text(board.qr_progress_label_), "QR DOWNLOADING 1024 B") == 0,
           "unknown size should show transferred bytes and an indeterminate bar");
     board.HideQrDownloadProgress();
     Check(board.qr_progress_panel_ == nullptr, "progress panel did not close");
+    constexpr char write_diagnostic[] = "QR E5 R524288 W524288 S109";
+    Check(lv_text_get_width(write_diagnostic, std::strlen(write_diagnostic), &lv_font_montserrat_14, 0)
+              <= 240 - 12 - 6, "write error details would clip on LCD");
     std::cout << "PASS real LVGL: QR progress percentage, unknown length, verification and cleanup\n";
     board.SetStartupQrImage(std::make_unique<LvglImage>(300), "864479086534998");
     lv_obj_update_layout(lv_screen_active());

@@ -14,9 +14,12 @@ def main():
     source = (ROOT / "main/boards/jiuchuan-s3/jiuchuan_dev_board.cc").read_text(encoding="utf-8")
     worker = source[source.index("    enum class TfQrState"):
                     source.index("    void StartTfQrInitialization()")]
+    sd_trace_start = source.index("struct SdCommandFailure")
+    sd_trace = source[sd_trace_start:source.index("#if defined(CONFIG_BT_NIMBLE_ROLE_OBSERVER)", sd_trace_start)]
     with tempfile.TemporaryDirectory(prefix="vanex-qr-test-") as folder:
         temp = Path(folder)
         (temp / "tf_qr_production.inc").write_text(worker, encoding="utf-8")
+        (temp / "tf_qr_sd_trace.inc").write_text(sd_trace, encoding="utf-8")
         for name in ("startup_flow_test", "startup_qr_jpeg_test", "tf_qr_test"):
             binary = temp / name
             subprocess.run([

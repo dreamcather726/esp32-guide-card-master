@@ -64,6 +64,22 @@ bool UseEarlyUsbPowerOnRetry() {
     return modem_retry_marker == kModemRetryMarker;
 }
 
+struct SdCommandFailure {
+    uint32_t command = 0;
+    esp_err_t code = ESP_OK;
+};
+
+// FAT reports EIO for several driver errors. Keep the original result on
+// the calling task so another TF reader cannot overwrite this write's error.
+thread_local SdCommandFailure sd_command_failure;
+
+esp_err_t TrackSdmmcTransaction(int slot, sdmmc_command_t* command) {
+    const auto result = sdmmc_host_do_transaction(slot, command);
+    const auto code = result == ESP_OK ? command->error : result;
+    if (code != ESP_OK) sd_command_failure = {command->opcode, code};
+    return result;
+}
+
 #if defined(CONFIG_BT_NIMBLE_ROLE_OBSERVER) && !defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
 constexpr const char* kBeaconTag = "BleBeacon";
 constexpr const char* kBeaconMacFilter = "D9:62:62";
@@ -773,15 +789,15 @@ public:
         if (open && !startup_qr_image_) lv_obj_move_foreground(diagnostic_label_);
     }
 
-    void SetQrDownloadProgress(size_t written, size_t total, bool verifying = false) {
+    void SetQrDownloadProgress(size_t received, size_t total, bool verifying = false) {
         const bool indeterminate = total == 0 && !verifying;
-        const int progress = verifying ? 99 : (indeterminate ? 0 :
-            static_cast<int>(std::min<size_t>(99, written * 100 / total)));
+        const int progress = verifying ? 100 : (indeterminate ? 0 :
+            static_cast<int>(std::min<size_t>(100, received * 100 / total)));
         char text[40];
         if (verifying) {
             std::snprintf(text, sizeof(text), "QR VERIFYING");
         } else if (indeterminate) {
-            std::snprintf(text, sizeof(text), "QR DOWN %zu B", written);
+            std::snprintf(text, sizeof(text), "QR DOWNLOADING %zu B", received);
         } else {
             std::snprintf(text, sizeof(text), "QR DOWNLOADING %d%%", progress);
         }
@@ -1039,6 +1055,7 @@ private:
 
     void InitializeSdCard() {
         sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+        host.do_transaction = TrackSdmmcTransaction;
         sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
         slot_config.clk = SD_PIN_CLK;
         slot_config.cmd = SD_PIN_CMD;
@@ -1332,6 +1349,26 @@ private:
         GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, diagnostic);
     }
 
+    void ReportQrWriteError(std::string& error, int code, size_t received, size_t written) {
+        const auto failure = sd_command_failure;
+        char diagnostic[40];
+        std::snprintf(diagnostic, sizeof(diagnostic), "QR E%d R%zu W%zu", code, received, written);
+        if (failure.code != ESP_OK) {
+            const size_t len = std::strlen(diagnostic);
+            if (failure.code < 0) {
+                std::snprintf(diagnostic + len, sizeof(diagnostic) - len, " S%d", failure.code);
+            } else {
+                std::snprintf(diagnostic + len, sizeof(diagnostic) - len, " S%X",
+                              static_cast<unsigned>(failure.code));
+            }
+            ESP_LOGE(BOARD_TAG, "[TF_QR] SDMMC CMD%u failed: %s (0x%X)",
+                     static_cast<unsigned>(failure.command), esp_err_to_name(failure.code),
+                     static_cast<unsigned>(failure.code));
+        }
+        error = diagnostic;
+        GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, diagnostic);
+    }
+
     TfQrState LoadStartupQr(const std::string& path,
                            std::unique_ptr<LvglImage>& image,
                            std::string& error) {
@@ -1426,6 +1463,8 @@ private:
                                       const std::string& temporary_path,
                                       std::unique_ptr<LvglImage>& image,
                                       std::string& error) {
+        auto* qr_display = static_cast<NoEmojiSpiLcdDisplay*>(display_);
+        qr_display->SetQrDownloadProgress(0, 0);
         auto* network = GetNetwork();
         auto http = network ? network->CreateHttp(4) : nullptr;
         if (!http) {
@@ -1462,8 +1501,8 @@ private:
             return TfDownloadResult::StorageError;
         }
 
+        size_t received = 0;
         size_t written = 0;
-        auto* qr_display = static_cast<NoEmojiSpiLcdDisplay*>(display_);
         qr_display->SetQrDownloadProgress(0, expected_size);
         char buffer[4096];
         TfDownloadResult result = TfDownloadResult::Success;
@@ -1478,21 +1517,23 @@ private:
             if (read == 0) {
                 break;
             }
-            if (written + static_cast<size_t>(read) > kMaxStartupQrBytes) {
+            received += static_cast<size_t>(read);
+            if (received > kMaxStartupQrBytes) {
                 error = "QR HTTP image exceeds size limit";
                 GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR FILE TOO LARGE");
                 result = TfDownloadResult::Retry;
                 break;
             }
+            qr_display->SetQrDownloadProgress(received, expected_size);
+            sd_command_failure = {};
             errno = 0;
-            if (std::fwrite(buffer, 1, static_cast<size_t>(read), file) !=
-                static_cast<size_t>(read)) {
-                ReportQrStorageError(error, "WRITE", errno == 0 ? EIO : errno);
+            const size_t stored = std::fwrite(buffer, 1, static_cast<size_t>(read), file);
+            written += stored;
+            if (stored != static_cast<size_t>(read)) {
+                ReportQrWriteError(error, errno == 0 ? EIO : errno, received, written);
                 result = TfDownloadResult::StorageError;
                 break;
             }
-            written += static_cast<size_t>(read);
-            qr_display->SetQrDownloadProgress(written, expected_size);
         }
         if (result == TfDownloadResult::Success &&
             (std::fflush(file) != 0 || fsync(fileno(file)) != 0)) {
@@ -1506,13 +1547,13 @@ private:
         http->Close();
         http.reset();
 
-        if (result == TfDownloadResult::Success && expected_size > 0 && written != expected_size) {
+        if (result == TfDownloadResult::Success && expected_size > 0 && received != expected_size) {
             error = "QR HTTP size mismatch";
             GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR HTTP INCOMPLETE");
             result = TfDownloadResult::Retry;
         }
         if (result == TfDownloadResult::Success) {
-            qr_display->SetQrDownloadProgress(written, expected_size, true);
+            qr_display->SetQrDownloadProgress(received, expected_size, true);
             auto state = LoadStartupQr(temporary_path, image, error);
             unsigned decode_attempt = 0;
             while (state == TfQrState::Retry) {
