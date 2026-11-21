@@ -183,10 +183,12 @@ void Es8311AudioCodec::EnableOutput(bool enable) {
 }
 
 int Es8311AudioCodec::Read(int16_t* dest, int samples) {
-    if (input_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(dev_, (void*)dest, samples * sizeof(int16_t)));
-    }
-    return samples;
+    std::lock_guard<std::mutex> lock(data_if_mutex_);
+    if (!input_enabled_ || !dev_) return 0;
+    const int result = esp_codec_dev_read(dev_, dest, samples * sizeof(int16_t));
+    if (result == ESP_CODEC_DEV_OK) return samples;
+    ESP_LOGD(TAG, "Microphone read failed: %d", result);
+    return 0;
 }
 
 int Es8311AudioCodec::Write(const int16_t* data, int samples) {

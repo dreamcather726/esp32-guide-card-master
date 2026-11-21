@@ -345,10 +345,6 @@ void Application::Run() {
             HandleStartListeningEvent();
         }
 
-        if (bits & MAIN_EVENT_STOP_LISTENING) {
-            HandleStopListeningEvent();
-        }
-
         if (bits & MAIN_EVENT_SEND_AUDIO) {
             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
                 if (protocol_ && protocol_->IsAudioChannelOpened()) {
@@ -364,6 +360,10 @@ void Application::Run() {
                     }
                 }
             }
+        }
+
+        if (bits & MAIN_EVENT_STOP_LISTENING) {
+            HandleStopListeningEvent();
         }
 
         if (bits & MAIN_EVENT_WAKE_WORD_DETECTED) {
@@ -2088,7 +2088,8 @@ void Application::HandleStopListeningEvent() {
             protocol_->SendStopListening();
         }
         if (voice_transmit_ == VoiceTransmit::Waiting) {
-            Board::GetInstance().GetDisplay()->SetDiagnostic(DiagnosticChannel::Voice, "VOICE NO AUDIO TX");
+            Board::GetInstance().GetDisplay()->SetDiagnostic(
+                DiagnosticChannel::Voice, audio_service_.VoiceCaptureDiagnostic());
         }
         SetDeviceState(kDeviceStateIdle);
     }

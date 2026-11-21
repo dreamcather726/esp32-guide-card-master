@@ -34,10 +34,14 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
         models = models_list;
     }
 
-    char* ns_model_name = esp_srmodel_filter(models, ESP_NSNET_PREFIX, NULL);
-    char* vad_model_name = esp_srmodel_filter(models, ESP_VADN_PREFIX, NULL);
+    char* ns_model_name = models ? esp_srmodel_filter(models, ESP_NSNET_PREFIX, NULL) : nullptr;
+    char* vad_model_name = models ? esp_srmodel_filter(models, ESP_VADN_PREFIX, NULL) : nullptr;
 
     afe_config_t* afe_config = afe_config_init(input_format.c_str(), NULL, AFE_TYPE_VC, AFE_MODE_HIGH_PERF);
+    if (!afe_config) {
+        ESP_LOGE(TAG, "Failed to allocate voice AFE configuration");
+        return;
+    }
     afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
     afe_config->vad_mode = VAD_MODE_0;
     afe_config->vad_min_noise_ms = 100;
@@ -65,13 +69,23 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
 #endif
 
     afe_iface_ = esp_afe_handle_from_config(afe_config);
-    afe_data_ = afe_iface_->create_from_config(afe_config);
+    afe_data_ = afe_iface_ ? afe_iface_->create_from_config(afe_config) : nullptr;
+    afe_config_free(afe_config);
+    if (!afe_data_) {
+        ESP_LOGE(TAG, "Failed to create voice AFE");
+        return;
+    }
 
-    xTaskCreate([](void* arg) {
+    const auto created = xTaskCreate([](void* arg) {
         auto this_ = (AfeAudioProcessor*)arg;
         this_->AudioProcessorTask();
         vTaskDelete(NULL);
     }, "audio_communication", 4096, this, 3, NULL);
+    if (created != pdPASS) {
+        afe_iface_->destroy(afe_data_);
+        afe_data_ = nullptr;
+        ESP_LOGE(TAG, "Failed to create voice AFE task");
+    }
 }
 
 AfeAudioProcessor::~AfeAudioProcessor() {
@@ -179,6 +193,7 @@ void AfeAudioProcessor::AudioProcessorTask() {
 }
 
 void AfeAudioProcessor::EnableDeviceAec(bool enable) {
+    if (!afe_data_) return;
     if (enable) {
 #if CONFIG_USE_DEVICE_AEC
         afe_iface_->disable_vad(afe_data_);

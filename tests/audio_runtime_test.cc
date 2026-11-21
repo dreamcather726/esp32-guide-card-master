@@ -76,6 +76,7 @@ BaseType_t xTaskCreatePinnedToCore(void (*entry)(void*), const char* name, int s
     return xTaskCreate(entry, name, stack, arg, priority, handle);
 }
 void vTaskDelete(void*) {}
+void vTaskDelay(int ticks) { std::this_thread::sleep_for(std::chrono::milliseconds(ticks)); }
 void esp_timer_stop(void*) {}
 void esp_timer_start_periodic(void*, int) {}
 void JoinWorkers() {
@@ -153,7 +154,15 @@ int esp_ae_rate_cvt_open(esp_ae_rate_cvt_cfg_t*, void** handle) {
 void esp_ae_rate_cvt_close(void* handle) { delete static_cast<int*>(handle); --live_resamplers; }
 void esp_ae_rate_cvt_get_max_out_sample_num(void*, size_t count, uint32_t* out) { *out = count; }
 void esp_ae_rate_cvt_process(void*, void*, size_t, void*, uint32_t*) {}
-struct FakeCodec { int output_sample_rate() { return 16000; } };
+struct FakeCodec {
+    int output_sample_rate() { return 16000; }
+    int input_channels() { return 1; }
+};
+struct FakeProcessor {
+    std::function<void()> on_feed;
+    int GetFeedSize() const { return 960; }
+    void Feed(const std::vector<int16_t>&) { on_feed(); }
+};
 
 class AudioService {
 public:
@@ -162,11 +171,14 @@ public:
     TaskHandle_t audio_input_task_handle_ = nullptr, audio_output_task_handle_ = nullptr,
                  opus_codec_task_handle_ = nullptr;
     void* audio_power_timer_ = nullptr;
-    std::mutex lifecycle_mutex_, audio_queue_mutex_, decoder_mutex_;
+    std::mutex lifecycle_mutex_, audio_queue_mutex_, decoder_mutex_, audio_processor_mutex_;
     std::condition_variable audio_queue_cv_;
     std::atomic<bool> service_stopped_{true};
     std::atomic<uint32_t> file_playback_generation_{0};
     bool voice_send_enabled_ = false;
+    enum class VoiceCaptureStage { Waiting, AfeNotReady, MicReadError, MicRead, EncodeError, Encoded };
+    std::atomic<VoiceCaptureStage> voice_capture_stage_{VoiceCaptureStage::Waiting};
+    std::atomic<bool> audio_input_need_warmup_{false};
     uint32_t encode_generation_ = 0, decode_generation_ = 0;
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_decode_queue_, audio_send_queue_, audio_testing_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_, audio_playback_queue_;
@@ -182,6 +194,10 @@ public:
     FakeCodec* codec_ = &codec;
     std::atomic<bool> hold_input{false};
     std::atomic<int> input_active{0}, max_input_active{0};
+    unsigned read_attempts = 0;
+    FakeProcessor voice_processor, wake_processor;
+    FakeProcessor* audio_processor_ = &voice_processor;
+    FakeProcessor* wake_word_ = &wake_processor;
 
     ~AudioService() {
         if (opus_decoder_) esp_opus_dec_close(opus_decoder_);
@@ -195,6 +211,13 @@ public:
     void ResetDecoder();
     void PushTaskToEncodeQueue(AudioTaskType, std::vector<int16_t>&&);
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket>, bool wait = false);
+    void TestProductionInput();
+    bool ReadAudioData(std::vector<int16_t>& data, int, int samples) {
+        if (++read_attempts == 1) return false;
+        data.assign(samples, 1);
+        return true;
+    }
+    void EnableAudioTesting(bool) {}
     void EnableVoiceProcessing(bool) {}
     void EnableWakeWordDetection(bool) {}
     void AudioInputTask() {
@@ -213,8 +236,22 @@ public:
     }
 };
 #include "audio_runtime.inc"
+#include "audio_input_production.inc"
 
 int main() {
+    {
+        AudioService audio;
+        audio.service_stopped_ = false;
+        audio.voice_send_enabled_ = true;
+        audio.voice_processor.on_feed = [&] { audio.service_stopped_ = true; };
+        audio.wake_processor.on_feed = [] { throw std::runtime_error("wake word captured during voice processing"); };
+        xEventGroupSetBits(&audio.event, AS_EVENT_AUDIO_PROCESSOR_RUNNING | AS_EVENT_WAKE_WORD_RUNNING);
+        audio.TestProductionInput();
+        Check(audio.read_attempts == 2, "input worker did not retry the failed microphone read");
+        Check(audio.voice_capture_stage_ == AudioService::VoiceCaptureStage::MicRead,
+              "microphone recovery did not advance diagnostics");
+        std::cout << "PASS: microphone read retries and voice capture takes priority over wake word\n";
+    }
     {
         AudioService audio;
         for (int i = 0; i < 50; ++i) {

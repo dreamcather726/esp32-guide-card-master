@@ -14,7 +14,9 @@
 | `PTT DOWN` / `PTT HELD` | 检测到按键 / 已触发长按。 |
 | `LINK MQTT NO ENDPOINT` / `LINK WS NO URL` | 缺少当前语音协议的连接配置。 |
 | `LINK … NO HELLO` / `LINK WS NO USER CONTEXT` | 未收到服务器握手 / 用户上下文。 |
-| `VOICE AUDIO TX OK` / `VOICE NO AUDIO TX` | 本轮至少发送一帧音频 / 松键时尚无音频帧发出。 |
+| `VOICE AUDIO TX OK` / `VOICE OPUS NO TX` | 本轮至少发送一帧音频 / 已编码，松键时发送尚未成功。 |
+| `VOICE MIC OR RATE ERR` / `VOICE NO MIC SAMPLES` | 麦克风读取或重采样失败 / 尚未采集到一块音频。 |
+| `VOICE AFE NOT READY` / `VOICE AFE NO FRAME` / `VOICE OPUS ERR` | 语音处理未就绪 / 已采集但未形成处理后的帧 / 编码失败。 |
 | `VOICE STT OK` / `VOICE TTS START` | 收到识别文字 / 收到语音回复开始事件。 |
 
 ## 四角图标

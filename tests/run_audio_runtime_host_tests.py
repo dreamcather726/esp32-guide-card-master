@@ -28,10 +28,16 @@ def main():
             "\n".join(source[source.index(start):source.index(end)] for start, end in sections),
             encoding="utf-8",
         )
+        start = source.index("void AudioService::AudioInputTask()")
+        end = source.index("void AudioService::AudioOutputTask()", start)
+        (temp / "audio_input_production.inc").write_text(
+            source[start:end].replace("AudioService::AudioInputTask()", "AudioService::TestProductionInput()"),
+            encoding="utf-8",
+        )
         binary = temp / "audio_runtime_test"
         subprocess.run([
             args.cxx, "-std=c++17", "-O1", "-g", "-pthread", "-Wall", "-Wextra", "-Werror",
-            "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I" + folder,
+            "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-no-pie", "-I" + folder,
             str(ROOT / "tests/audio_runtime_test.cc"), "-o", str(binary),
         ], check=True)
         subprocess.run([str(binary)], check=True, timeout=60)

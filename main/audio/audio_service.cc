@@ -291,20 +291,26 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
     }
 
     if (codec_->input_sample_rate() != sample_rate) {
+        if (input_resampler_ == nullptr) return false;
         data.resize(samples * codec_->input_sample_rate() / sample_rate * codec_->input_channels());
         if (!codec_->InputData(data)) {
             return false;
         }
-        if (input_resampler_ != nullptr) {
+        {
             std::lock_guard<std::mutex> lock(input_resampler_mutex_);
             uint32_t in_sample_num = data.size() / codec_->input_channels();
             uint32_t output_samples = 0;
             esp_ae_rate_cvt_get_max_out_sample_num(input_resampler_, in_sample_num, &output_samples);
             auto resampled = std::vector<int16_t>(output_samples * codec_->input_channels());
             uint32_t actual_output = output_samples;
-            esp_ae_rate_cvt_process(input_resampler_, (esp_ae_sample_t)data.data(), in_sample_num,
-                                   (esp_ae_sample_t)resampled.data(), &actual_output);
+            if (esp_ae_rate_cvt_process(input_resampler_, (esp_ae_sample_t)data.data(), in_sample_num,
+                                        (esp_ae_sample_t)resampled.data(), &actual_output) != ESP_AE_ERR_OK ||
+                actual_output == 0) {
+                return false;
+            }
             resampled.resize(actual_output * codec_->input_channels());
+            // AFE always consumes exactly one feed chunk.
+            resampled.resize(samples * codec_->input_channels());
             data = std::move(resampled);
         }
     } else {
@@ -332,6 +338,7 @@ bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, in
 }
 
 void AudioService::AudioInputTask() {
+    bool reported_failure = false;
     while (true) {
         EventBits_t bits = xEventGroupWaitBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING |
             AS_EVENT_WAKE_WORD_RUNNING | AS_EVENT_AUDIO_PROCESSOR_RUNNING,
@@ -340,8 +347,7 @@ void AudioService::AudioInputTask() {
         if (service_stopped_) {
             break;
         }
-        if (audio_input_need_warmup_) {
-            audio_input_need_warmup_ = false;
+        if (audio_input_need_warmup_.exchange(false)) {
             vTaskDelay(pdMS_TO_TICKS(120));
             continue;
         }
@@ -376,12 +382,13 @@ void AudioService::AudioInputTask() {
         }
 
         /* Feed the wake word */
-        if (bits & AS_EVENT_WAKE_WORD_RUNNING) {
+        if ((bits & AS_EVENT_WAKE_WORD_RUNNING) && !(bits & AS_EVENT_AUDIO_PROCESSOR_RUNNING)) {
             std::vector<int16_t> data;
             int samples = wake_word_->GetFeedSize();
             if (samples > 0) {
                 if (ReadAudioData(data, 16000, samples)) {
                     wake_word_->Feed(data);
+                    reported_failure = false;
                     continue;
                 }
             }
@@ -396,22 +403,32 @@ void AudioService::AudioInputTask() {
             }
             std::vector<int16_t> data;
             int samples = audio_processor_->GetFeedSize();
-            if (samples > 0) {
-                if (ReadAudioData(data, 16000, samples)) {
-                    std::lock_guard<std::mutex> processor_lock(audio_processor_mutex_);
-                    bool current;
-                    {
-                        std::lock_guard<std::mutex> lock(audio_queue_mutex_);
-                        current = voice_send_enabled_ && generation == encode_generation_;
+            bool current;
+            const bool read = samples > 0 && ReadAudioData(data, 16000, samples);
+            {
+                std::lock_guard<std::mutex> processor_lock(audio_processor_mutex_);
+                {
+                    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+                    current = voice_send_enabled_ && generation == encode_generation_;
+                    if (current && voice_capture_stage_ != VoiceCaptureStage::Encoded &&
+                        voice_capture_stage_ != VoiceCaptureStage::EncodeError) {
+                        voice_capture_stage_ = read ? VoiceCaptureStage::MicRead :
+                            samples > 0 ? VoiceCaptureStage::MicReadError : VoiceCaptureStage::AfeNotReady;
                     }
-                    if (current) audio_processor_->Feed(std::move(data));
-                    continue;
                 }
+                if (read && current) audio_processor_->Feed(std::move(data));
+            }
+            if (read) {
+                reported_failure = false;
+                continue;
             }
         }
 
-        ESP_LOGE(TAG, "Should not be here, bits: %lx", bits);
-        break;
+        if (!reported_failure) {
+            ESP_LOGW(TAG, "Audio input unavailable, retrying (bits: %lx)", bits);
+            reported_failure = true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 
     ESP_LOGW(TAG, "Audio input task stopped");
@@ -541,6 +558,7 @@ void AudioService::OpusCodecTask() {
             packet->frame_duration = OPUS_FRAME_DURATION_MS;
             packet->sample_rate = 16000;
             packet->timestamp = task->timestamp;
+            bool encoded = false;
 
             if (opus_encoder_ != nullptr && task->pcm.size() == static_cast<size_t>(encoder_frame_size_)) {
                 std::vector<uint8_t> buf(encoder_outbuf_size_);
@@ -554,13 +572,15 @@ void AudioService::OpusCodecTask() {
                     .encoded_bytes = 0,
                 };
                 auto ret = esp_opus_enc_process(opus_encoder_, &in, &out);
-                if (ret == ESP_AUDIO_ERR_OK) {
+                if (ret == ESP_AUDIO_ERR_OK && out.encoded_bytes > 0) {
+                    encoded = true;
                     packet->payload.assign(buf.data(), buf.data() + out.encoded_bytes);
 
                     if (task->type == kAudioTaskTypeEncodeToSendQueue) {
                         {
                             std::lock_guard<std::mutex> lock2(audio_queue_mutex_);
                             if (!service_stopped_ && voice_send_enabled_ && task->generation == encode_generation_) {
+                                voice_capture_stage_ = VoiceCaptureStage::Encoded;
                                 audio_send_queue_.push_back(std::move(packet));
                             }
                         }
@@ -582,6 +602,11 @@ void AudioService::OpusCodecTask() {
                          task->pcm.size(), encoder_frame_size_);
             }
             lock.lock();
+            if (!encoded && task->type == kAudioTaskTypeEncodeToSendQueue &&
+                voice_send_enabled_ && task->generation == encode_generation_ &&
+                voice_capture_stage_ != VoiceCaptureStage::Encoded) {
+                voice_capture_stage_ = VoiceCaptureStage::EncodeError;
+            }
         }
     }
 
@@ -733,6 +758,7 @@ void AudioService::EnableVoiceProcessing(bool enable) {
     {
         std::lock_guard<std::mutex> lock(audio_queue_mutex_);
         voice_send_enabled_ = enable;
+        if (enable) voice_capture_stage_ = VoiceCaptureStage::Waiting;
         ++encode_generation_;
         audio_encode_queue_.clear();
         audio_send_queue_.clear();
@@ -742,7 +768,13 @@ void AudioService::EnableVoiceProcessing(bool enable) {
     if (enable) {
         if (!audio_processor_initialized_) {
             audio_processor_->Initialize(codec_, OPUS_FRAME_DURATION_MS, models_list_);
-            audio_processor_initialized_ = true;
+            audio_processor_initialized_ = audio_processor_->GetFeedSize() > 0;
+        }
+        if (!audio_processor_initialized_) {
+            std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+            voice_send_enabled_ = false;
+            voice_capture_stage_ = VoiceCaptureStage::AfeNotReady;
+            return;
         }
 
         /* We should make sure no audio is playing */
@@ -764,6 +796,20 @@ void AudioService::EnableVoiceProcessing(bool enable) {
     }
 }
 
+const char* AudioService::VoiceCaptureDiagnostic() const {
+    if (service_stopped_ || (xEventGroupGetBits(event_group_) & AS_EVENT_INPUT_EXITED)) return "VOICE INPUT STOPPED";
+    if (!input_resampler_ && codec_->input_sample_rate() != 16000) return "VOICE RESAMPLE INIT ERR";
+    switch (voice_capture_stage_.load()) {
+        case VoiceCaptureStage::AfeNotReady: return "VOICE AFE NOT READY";
+        case VoiceCaptureStage::MicReadError: return "VOICE MIC OR RATE ERR";
+        case VoiceCaptureStage::MicRead: return "VOICE AFE NO FRAME";
+        case VoiceCaptureStage::EncodeError: return "VOICE OPUS ERR";
+        case VoiceCaptureStage::Encoded: return "VOICE OPUS NO TX";
+        case VoiceCaptureStage::Waiting: return "VOICE NO MIC SAMPLES";
+    }
+    return "VOICE NO AUDIO TX";
+}
+
 void AudioService::EnableAudioTesting(bool enable) {
     ESP_LOGI(TAG, "%s audio testing", enable ? "Enabling" : "Disabling");
     if (enable) {
@@ -779,9 +825,10 @@ void AudioService::EnableAudioTesting(bool enable) {
 
 void AudioService::EnableDeviceAec(bool enable) {
     ESP_LOGI(TAG, "%s device AEC", enable ? "Enabling" : "Disabling");
+    std::lock_guard<std::mutex> processor_lock(audio_processor_mutex_);
     if (!audio_processor_initialized_) {
         audio_processor_->Initialize(codec_, OPUS_FRAME_DURATION_MS, models_list_);
-        audio_processor_initialized_ = true;
+        audio_processor_initialized_ = audio_processor_->GetFeedSize() > 0;
     }
 
     audio_processor_->EnableDeviceAec(enable);

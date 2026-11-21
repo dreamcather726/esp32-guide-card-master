@@ -123,6 +123,7 @@ public:
     bool IsIdle();
     bool IsWakeWordRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING; }
     bool IsAudioProcessorRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_AUDIO_PROCESSOR_RUNNING; }
+    const char* VoiceCaptureDiagnostic() const;
     bool IsAfeWakeWord();
 
     void EnableWakeWordDetection(bool enable);
@@ -187,6 +188,8 @@ private:
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
     bool playback_active_ = false;
     bool voice_send_enabled_ = false;
+    enum class VoiceCaptureStage { Waiting, AfeNotReady, MicReadError, MicRead, EncodeError, Encoded };
+    std::atomic<VoiceCaptureStage> voice_capture_stage_{VoiceCaptureStage::Waiting};
     uint32_t encode_generation_ = 0;
     uint32_t decode_generation_ = 0;
     // For server AEC
@@ -196,7 +199,7 @@ private:
     bool audio_processor_initialized_ = false;
     bool voice_detected_ = false;
     std::atomic<bool> service_stopped_{true};
-    bool audio_input_need_warmup_ = false;
+    std::atomic<bool> audio_input_need_warmup_{false};
     std::atomic<uint32_t> file_playback_generation_{0};
     void* mp3_decoder_ = nullptr;
     bool mp3_decoder_registered_ = false;
