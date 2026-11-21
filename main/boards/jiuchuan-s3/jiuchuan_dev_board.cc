@@ -225,6 +225,9 @@ private:
     std::atomic<bool> diagnostic_page_open_{false};
     bool diagnostic_dirty_ = false;
     lv_obj_t* diagnostic_label_ = nullptr;
+    lv_obj_t* qr_progress_panel_ = nullptr;
+    lv_obj_t* qr_progress_label_ = nullptr;
+    lv_obj_t* qr_progress_bar_ = nullptr;
     const RndisBoard& rndis_board_;
     int subtitle_scroll_offset_ = 0;
     int subtitle_scroll_max_offset_ = 0;
@@ -292,6 +295,43 @@ private:
         std::snprintf(line.text.data(), line.text.size(), "%s", message);
         line.fault = fault;
         diagnostic_dirty_ = true;
+    }
+
+    bool CreateQrProgress() {
+        qr_progress_panel_ = lv_obj_create(lv_screen_active());
+        if (qr_progress_panel_ == nullptr) return false;
+        lv_obj_set_size(qr_progress_panel_, width_ - 24, 46);
+        lv_obj_align(qr_progress_panel_, LV_ALIGN_TOP_MID, 0, 32);
+        lv_obj_remove_flag(qr_progress_panel_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_pad_all(qr_progress_panel_, 0, 0);
+        lv_obj_set_style_border_width(qr_progress_panel_, 0, 0);
+        lv_obj_set_style_radius(qr_progress_panel_, 6, 0);
+        lv_obj_set_style_bg_color(qr_progress_panel_, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(qr_progress_panel_, LV_OPA_COVER, 0);
+        qr_progress_label_ = lv_label_create(qr_progress_panel_);
+        qr_progress_bar_ = lv_bar_create(qr_progress_panel_);
+        if (qr_progress_label_ == nullptr || qr_progress_bar_ == nullptr) {
+            lv_obj_delete(qr_progress_panel_);
+            qr_progress_panel_ = nullptr;
+            return false;
+        }
+        lv_obj_set_style_text_font(qr_progress_label_, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(qr_progress_label_, lv_color_white(), 0);
+        lv_obj_align(qr_progress_label_, LV_ALIGN_TOP_MID, 0, 6);
+        lv_obj_set_size(qr_progress_bar_, width_ - 48, 7);
+        lv_obj_align(qr_progress_bar_, LV_ALIGN_BOTTOM_MID, 0, -8);
+        lv_obj_set_style_bg_color(qr_progress_bar_, lv_color_hex(0x555555), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(qr_progress_bar_, lv_color_white(), LV_PART_INDICATOR);
+        lv_bar_set_range(qr_progress_bar_, 0, 100);
+        if (IsDiagnosticPageOpen()) lv_obj_move_foreground(diagnostic_label_);
+        return true;
+    }
+
+    static void AnimateQrProgress(void* object, int32_t start) {
+        auto* bar = static_cast<lv_obj_t*>(object);
+        lv_bar_set_start_value(bar, 0, LV_ANIM_OFF);
+        lv_bar_set_value(bar, start + 20, LV_ANIM_OFF);
+        lv_bar_set_start_value(bar, start, LV_ANIM_OFF);
     }
 
     static void SetSubtitleY(void* object, int32_t value) {
@@ -487,6 +527,7 @@ public:
         navigation_.reset();
         guide_pages_.reset();
         lv_obj_delete(diagnostic_label_);
+        if (qr_progress_panel_ != nullptr) lv_obj_delete(qr_progress_panel_);
         StopSubtitleScrolling();
         if (subtitle_scroll_timer_ != nullptr) {
             lv_timer_delete(subtitle_scroll_timer_);
@@ -730,6 +771,51 @@ public:
         diagnostic_page_open_ = open;
         RefreshDiagnostics(true);
         if (open && !startup_qr_image_) lv_obj_move_foreground(diagnostic_label_);
+    }
+
+    void SetQrDownloadProgress(size_t written, size_t total, bool verifying = false) {
+        const bool indeterminate = total == 0 && !verifying;
+        const int progress = verifying ? 99 : (indeterminate ? 0 :
+            static_cast<int>(std::min<size_t>(99, written * 100 / total)));
+        char text[40];
+        if (verifying) {
+            std::snprintf(text, sizeof(text), "QR VERIFYING");
+        } else if (indeterminate) {
+            std::snprintf(text, sizeof(text), "QR DOWN %zu B", written);
+        } else {
+            std::snprintf(text, sizeof(text), "QR DOWNLOADING %d%%", progress);
+        }
+        DisplayLockGuard lock(this);
+        if (qr_progress_panel_ == nullptr && !CreateQrProgress()) return;
+        SetDiagnosticStatus(DiagnosticChannel::Qr, text);
+        if (std::strcmp(lv_label_get_text(qr_progress_label_), text) != 0) {
+            lv_label_set_text(qr_progress_label_, text);
+        }
+        if (indeterminate) {
+            if (lv_bar_get_mode(qr_progress_bar_) == LV_BAR_MODE_RANGE) return;
+            lv_bar_set_mode(qr_progress_bar_, LV_BAR_MODE_RANGE);
+            lv_anim_t animation;
+            lv_anim_init(&animation);
+            lv_anim_set_var(&animation, qr_progress_bar_);
+            lv_anim_set_exec_cb(&animation, AnimateQrProgress);
+            lv_anim_set_values(&animation, 0, 80);
+            lv_anim_set_duration(&animation, 1000);
+            lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
+            lv_anim_start(&animation);
+        } else {
+            if (lv_bar_get_mode(qr_progress_bar_) == LV_BAR_MODE_RANGE) {
+                lv_anim_delete(qr_progress_bar_, AnimateQrProgress);
+                lv_bar_set_mode(qr_progress_bar_, LV_BAR_MODE_NORMAL);
+            }
+            lv_bar_set_value(qr_progress_bar_, progress, LV_ANIM_OFF);
+        }
+    }
+
+    void HideQrDownloadProgress() {
+        DisplayLockGuard lock(this);
+        if (qr_progress_panel_ == nullptr) return;
+        lv_obj_delete(qr_progress_panel_);
+        qr_progress_panel_ = nullptr;
     }
 
     void UpdateStatusBar(bool update_all = false) override {
@@ -1377,6 +1463,8 @@ private:
         }
 
         size_t written = 0;
+        auto* qr_display = static_cast<NoEmojiSpiLcdDisplay*>(display_);
+        qr_display->SetQrDownloadProgress(0, expected_size);
         char buffer[4096];
         TfDownloadResult result = TfDownloadResult::Success;
         while (true) {
@@ -1404,6 +1492,7 @@ private:
                 break;
             }
             written += static_cast<size_t>(read);
+            qr_display->SetQrDownloadProgress(written, expected_size);
         }
         if (result == TfDownloadResult::Success &&
             (std::fflush(file) != 0 || fsync(fileno(file)) != 0)) {
@@ -1423,6 +1512,7 @@ private:
             result = TfDownloadResult::Retry;
         }
         if (result == TfDownloadResult::Success) {
+            qr_display->SetQrDownloadProgress(written, expected_size, true);
             auto state = LoadStartupQr(temporary_path, image, error);
             unsigned decode_attempt = 0;
             while (state == TfQrState::Retry) {
@@ -1551,6 +1641,7 @@ private:
                 }
                 GetDisplay()->SetDiagnostic(DiagnosticChannel::Qr, "QR DOWNLOADING");
                 const auto result = DownloadStartupQr(url, path, temporary_path, image, error);
+                static_cast<NoEmojiSpiLcdDisplay*>(display_)->HideQrDownloadProgress();
                 if (result == TfDownloadResult::Success) {
                     GetDisplay()->SetDiagnosticStatus(DiagnosticChannel::Qr, "QR SAVED TF");
                     ShowStartupQr(std::move(image), imei);

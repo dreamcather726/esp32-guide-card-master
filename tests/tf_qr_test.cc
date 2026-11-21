@@ -26,6 +26,7 @@ static const std::string kUrl = "https://iotossbj.suji.work/SDfile/QR/" + kImei 
 static std::vector<uint32_t> delays;
 static std::function<void()> on_delay;
 static bool fail_sync = false, fail_write = false, fail_rename = false;
+static int writes_before_failure = -1;
 static int no_memory_decodes = 0;
 static size_t decoded_width = 300;
 static int decode_calls = 0;
@@ -51,7 +52,8 @@ static int TestFsync(int fd) {
     return ::fsync(fd);
 }
 static size_t TestWrite(const void* data, size_t size, size_t count, FILE* file) {
-    if (fail_write) { errno = ENOSPC; return 0; }
+    if (fail_write || writes_before_failure == 0) { errno = ENOSPC; return 0; }
+    if (writes_before_failure > 0) --writes_before_failure;
     return std::fwrite(data, size, count, file);
 }
 
@@ -91,6 +93,16 @@ struct NoEmojiSpiLcdDisplay {
     int shows = 0;
     std::unique_ptr<LvglImage> image;
     std::string diagnostic;
+    std::vector<size_t> written_progress;
+    size_t progress_total = 0;
+    bool progress_visible = false, progress_verified = false;
+    void SetQrDownloadProgress(size_t written, size_t total, bool verifying = false) {
+        progress_visible = true;
+        progress_total = total;
+        if (verifying) progress_verified = true;
+        else written_progress.push_back(written);
+    }
+    void HideQrDownloadProgress() { progress_visible = false; }
     void SetDiagnostic(DiagnosticChannel channel, const char* value) {
         Check(channel == DiagnosticChannel::Qr, "wrong QR diagnostic channel");
         diagnostic = value;
@@ -100,6 +112,7 @@ struct NoEmojiSpiLcdDisplay {
     }
     void SetStartupQrImage(std::unique_ptr<LvglImage> value, const std::string& imei) {
         Check(imei == kImei, "startup display IMEI mismatch");
+        Check(!progress_visible, "progress covered the displayed QR");
         ++shows; image = std::move(value);
     }
 };
@@ -123,6 +136,7 @@ struct Response {
     int status = 200;
     size_t expected = Jpeg().size();
     int read_error_after = -1;
+    size_t max_chunk = 4096;
 };
 struct FakeHttp {
     Response response;
@@ -136,7 +150,7 @@ struct FakeHttp {
     size_t GetBodyLength() const { return response.expected; }
     int Read(char* buffer, size_t capacity) {
         if (response.read_error_after >= 0 && offset >= static_cast<size_t>(response.read_error_after)) return -1;
-        size_t size = std::min(capacity, response.body.size() - offset);
+        size_t size = std::min({capacity, response.max_chunk, response.body.size() - offset});
         if (response.read_error_after >= 0) size = std::min(size, static_cast<size_t>(response.read_error_after) - offset);
         std::memcpy(buffer, response.body.data() + offset, size);
         offset += size;
@@ -232,6 +246,7 @@ static void Run(const char* name, const std::function<void(TestBoard&)>& test) {
     fs::current_path(folder);
     fs::create_directory("sdcard");
     delays.clear(); on_delay = {}; fail_sync = fail_write = fail_rename = false;
+    writes_before_failure = -1;
     no_memory_decodes = 0; decoded_width = 300; decode_calls = 0;
     cached_imei.clear();
     configured_imei.clear();
@@ -244,6 +259,24 @@ int main() {
     Run("missing QR downloaded to IMEI.jpg and displayed", [](TestBoard& b) {
         b.EnsureTfStartupQr(); Ready(b);
         Check(!fs::exists(kPartial), "partial file remains");
+    });
+    Run("QR progress tracks successful TF writes before verification", [](TestBoard& b) {
+        b.network.responses[0].max_chunk = 10;
+        b.EnsureTfStartupQr(); Ready(b);
+        Check(b.display.written_progress == std::vector<size_t>{0, 10, 20, Jpeg().size()},
+              "progress did not follow written bytes");
+        Check(b.display.progress_total == Jpeg().size() && b.display.progress_verified &&
+              !b.display.progress_visible, "progress did not switch to verification and close");
+    });
+    Run("QR write failure hides progress without counting the failed chunk", [](TestBoard& b) {
+        b.network.responses[0].max_chunk = 10;
+        writes_before_failure = 1;
+        b.EnsureTfStartupQr();
+        Check(b.display.written_progress == std::vector<size_t>{0, 10} &&
+              !b.display.progress_visible && !b.display.progress_verified,
+              "failed write left incorrect or visible progress");
+        Check(b.display.diagnostic.rfind("QR TF WRITE E", 0) == 0 && b.display.shows == 0,
+              "progress hid the write failure");
     });
     Run("cached QR displayed offline before USB IP readiness", [](TestBoard& b) {
         Write(kPath, Jpeg()); b.ready = false; b.network_present = false;
@@ -342,6 +375,8 @@ int main() {
     Run("unknown content length accepted only after JPEG validation", [](TestBoard& b) {
         b.network.responses[0].expected = 0;
         b.EnsureTfStartupQr(); Ready(b);
+        Check(b.display.progress_total == 0 && b.display.progress_verified,
+              "unknown length did not reach verification");
     });
     Run("oversized declared or streamed response rejected", [](TestBoard& b) {
         b.network.responses = {Response{}, Response{}, Response{}};

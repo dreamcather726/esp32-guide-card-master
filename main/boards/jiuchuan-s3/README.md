@@ -48,4 +48,6 @@ I (...) BleBeacon: MAC=D9:62:62:00:00:0D RSSI=-83 dBm
 
 `POS MQTT SUB OK` 表示定位主题已订阅，`POS RX FIX=1 SAT=15` 表示收到有效定位和 15 颗卫星。BLE 行末数值的单位为 dBm。`KJ TX #3 BLE=2` 表示本次开机 MQTT 客户端已接受第 3 个 KJ 包，包里有 2 个信标。KJ 使用 QoS 0，服务端是否收到需查看服务端订阅记录。
 
+从 `2.1.36` 起，首次联网下载二维码时，初始化页面会显示 TF 写入进度。服务器提供文件长度时显示百分比，长度未知时显示已写字节数。写完后显示 `QR VERIFYING`，校验并保存成功后进入二维码页面。失败时收起进度条，屏幕保留具体的 HTTP 或 TF 错误。
+
 本固件使用 `sdkconfig.jiuchuan-s3`。从旧版构建目录继续编译时，请同步启用该配置里的 NimBLE Observer 选项，或重新生成 sdkconfig。
