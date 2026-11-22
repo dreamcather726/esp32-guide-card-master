@@ -984,6 +984,12 @@ bool RndisBoard::IsNetworkReady() const {
            (xEventGroupGetBits(s_event_group) & EVENT_GOT_IP_BIT) != 0;
 }
 
+bool RndisBoard::GetRndisIpInfo(esp_netif_ip_info_t& info) const {
+    return IsNetworkReady() && s_rndis_netif != nullptr &&
+           esp_netif_get_ip_info(s_rndis_netif, &info) == ESP_OK &&
+           info.ip.addr != 0 && info.gw.addr != 0;
+}
+
 bool RndisBoard::HasUsbModem() {
     std::lock_guard<std::mutex> lock(usb_state_mutex_);
     return usb_device_addr_ != 0;

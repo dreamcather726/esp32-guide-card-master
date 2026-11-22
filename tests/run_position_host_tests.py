@@ -25,7 +25,10 @@ def main():
                                                     cabinet.index("constexpr const char* kCredentialsUrl")], encoding="utf-8")
         (temp / "subscriber.inc").write_text(header[header.index("class PositionSubscriber {"):] + "\n" + source[source.index("namespace {"):], encoding="utf-8")
         (temp / "online_report.inc").write_text("\n".join([
+            cabinet[cabinet.index("struct BleBeaconSample {"):cabinet.index("\nstd::string", cabinet.index("int AddBleBeaconReport("))],
             cabinet[cabinet.index("void AddString("):cabinet.index("}  // namespace")],
+            cabinet[cabinet.index("bool LocationMqttClient::RecordBleBeacon("):cabinet.index("LocationMqttClient::LocationMqttClient(")],
+            cabinet[cabinet.index("void LocationMqttClient::CloseBlueScanSocket("):cabinet.index("bool LocationMqttClient::StartMqtt(")],
             cabinet[cabinet.index("bool LocationMqttClient::PublishOnlineReport("):cabinet.index("void LocationMqttClient::PersistRuntimeCheckpoint(")],
         ]), encoding="utf-8")
         for name in ("position_data_test", "position_subscriber_test"):

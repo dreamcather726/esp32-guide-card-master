@@ -115,6 +115,7 @@ public:
     /** Wait until USB RNDIS has received an IP address from the modem. */
     bool WaitForNetworkReady(uint32_t timeout_ms);
     bool IsNetworkReady() const;
+    bool GetRndisIpInfo(esp_netif_ip_info_t& info) const;
 
 };
 #endif // CONFIG_IDF_TARGET_ESP32P4 || CONFIG_IDF_TARGET_ESP32S3

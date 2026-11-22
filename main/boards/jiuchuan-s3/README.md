@@ -33,6 +33,22 @@
 
 开机资源沿用 TF 卡上的 `<IMEI>.jpg` 和 `start.wav`。卡上缺失时，4G 就绪后按原地址补下载。TF 写卡故障在诊断页显示已接收字节、已写字节和 SDMMC 错误码。
 
+## BLE 信标
+
+ML307 的 AT 口就绪后，ESP32-S3 开始被动扫描 BLE 广播。MAC 包含 `D9:62:62` 且 RSSI 有效的记录会出现在串口和诊断页。串口示例为 `MAC=D9:62:62:00:00:0D type=public RSSI=-83 dBm`。
+
+业务 MQTT 在 `device/broadcast/online` 的 `KJ` 报文中用 `bleBeacons` 上报匹配结果，每个 MAC 保留最近一次 RSSI，最多 16 个。90 秒内无新采样的记录会过期。诊断页的 `KJ TX #44 BLE=1` 表示第 44 次本地发送包含 1 个信标。
+
+```json
+{"cmd":"KJ","bleBeacons":[{"macAddress":"D9:62:62:00:00:0D","rssi":-83}]}
+```
+
+ESP32 还会读取 USB RNDIS 的 IPv4 网关，从 RNDIS 接口地址每约 10 秒向该网关的 UDP `8000` 发送一份 BlueScan 快照。没有有效样本时发送 `[]`。ML307 用自己的定位数据合包上报。ESP32 在诊断页用 `BLUE WAIT IP` 显示等待网关，`BLUE WAIT OK` 显示等待回复，`BLUE OK 2` 表示网关确认收到 2 个信标，`BLUE NO ACK` 表示约 3 秒未取得 `OK` 将在后续周期重试。`BLUE OK` 确认的是模组收包，服务器到达情况以模组上报或服务端记录为准。
+
+```json
+[{"mac":"D9:62:62:00:00:0D","rssi":-83},{"mac":"D9:62:62:00:00:0E","rssi":-65}]
+```
+
 ## 烧录
 
 使用 ESP-IDF 5.5.4 和仓库根目录的 `sdkconfig.defaults`。完整 BIN 烧录地址为 `0x0`，串口监视器使用 115200 波特率。编译命令见[根目录说明](../../../README.md)。

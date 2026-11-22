@@ -20,8 +20,11 @@
 #include <esp_heap_caps.h>
 #include <esp_vfs_fat.h>
 #include <http.h>
+#include <lwip/sockets.h>
+#include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <climits>
@@ -30,6 +33,7 @@
 #include <cstring>
 #include <cerrno>
 #include <initializer_list>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -58,6 +62,50 @@ constexpr uint32_t kReconnectGraceMs = 60000;
 constexpr uint32_t kOnlineReportIntervalSeconds = 60;
 constexpr int kDefaultCredentialSeconds = 3600;
 constexpr int kCredentialRefreshMarginSeconds = 300;
+
+struct BleBeaconSample {
+    char mac[18]{};
+    int rssi = 0;
+    int64_t seen_us = 0;
+};
+
+constexpr int64_t kBleBeaconMaxAgeUs = 90LL * 1000 * 1000;
+constexpr uint16_t kBlueScanPort = 8000;
+constexpr int64_t kBlueScanIntervalUs = 10LL * 1000 * 1000;
+constexpr int64_t kBlueScanAckTimeoutUs = 3LL * 1000 * 1000;
+std::mutex ble_beacon_mutex;
+std::array<BleBeaconSample, 16> ble_beacons{};
+
+std::unique_ptr<cJSON, decltype(&cJSON_Delete)> BuildBleBeaconList(const char* mac_key) {
+    const auto snapshot = [] {
+        std::lock_guard lock(ble_beacon_mutex);
+        return ble_beacons;
+    }();
+    const int64_t now = esp_timer_get_time();
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> items(cJSON_CreateArray(), cJSON_Delete);
+    if (!items) return items;
+    for (const auto& sample : snapshot) {
+        if (sample.mac[0] == '\0' || now - sample.seen_us >= kBleBeaconMaxAgeUs) continue;
+        std::unique_ptr<cJSON, decltype(&cJSON_Delete)> entry(cJSON_CreateObject(), cJSON_Delete);
+        if (!entry || !cJSON_AddStringToObject(entry.get(), mac_key, sample.mac) ||
+            !cJSON_AddNumberToObject(entry.get(), "rssi", sample.rssi) ||
+            !cJSON_AddItemToArray(items.get(), entry.get())) {
+            items.reset();
+            return items;
+        }
+        entry.release();
+    }
+    return items;
+}
+
+int AddBleBeaconReport(cJSON* root) {
+    auto items = BuildBleBeaconList("macAddress");
+    if (!items) return -1;
+    const int count = cJSON_GetArraySize(items.get());
+    if (!cJSON_AddItemToObject(root, "bleBeacons", items.get())) return -1;
+    items.release();
+    return count;
+}
 
 std::string Trim(std::string value) {
     auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };
@@ -332,6 +380,29 @@ void AddString(cJSON* root, const char* key, const std::string& value) {
 
 }  // namespace
 
+bool LocationMqttClient::RecordBleBeacon(const char (&mac)[18], int rssi) {
+    // The scanner formats addresses in uppercase and 127 means RSSI is unavailable.
+    if (std::strstr(mac, "D9:62:62") == nullptr || rssi == 127) return false;
+
+    std::lock_guard lock(ble_beacon_mutex);
+    auto slot = std::find_if(ble_beacons.begin(), ble_beacons.end(), [&](const BleBeaconSample& sample) {
+        return std::strcmp(sample.mac, mac) == 0;
+    });
+    if (slot == ble_beacons.end()) {
+        slot = std::min_element(ble_beacons.begin(), ble_beacons.end(),
+            [](const BleBeaconSample& left, const BleBeaconSample& right) {
+                const bool left_empty = left.mac[0] == '\0';
+                const bool right_empty = right.mac[0] == '\0';
+                if (left_empty != right_empty) return left_empty;
+                return left.seen_us < right.seen_us;
+            });
+        std::memcpy(slot->mac, mac, sizeof(slot->mac));
+    }
+    slot->rssi = rssi;
+    slot->seen_us = esp_timer_get_time();
+    return true;
+}
+
 LocationMqttClient::LocationMqttClient(RndisBoard& board, std::function<bool()> network_ready)
     : board_(board), position_subscriber_(std::make_unique<PositionSubscriber>(board, std::move(network_ready))) {
     Settings settings(kSettingsNamespace);
@@ -396,6 +467,7 @@ void LocationMqttClient::Stop() {
     // positioning client that this worker now services.
     while (running_) vTaskDelay(pdMS_TO_TICKS(10));
     task_handle_ = nullptr;
+    CloseBlueScanSocket();
     PersistRuntimeCheckpoint();
     StopMqtt();
 }
@@ -403,6 +475,7 @@ void LocationMqttClient::Stop() {
 void LocationMqttClient::TaskEntry(void* arg) {
     auto* client = static_cast<LocationMqttClient*>(arg);
     client->Run();
+    client->CloseBlueScanSocket();
     // Quiesce business MQTT callbacks before releasing their notification task.
     client->StopMqtt();
     client->task_handle_ = nullptr;
@@ -420,6 +493,7 @@ bool LocationMqttClient::WaitOrStop(uint32_t delay_ms, bool interrupt_on_network
         // Keep the independent position connection/CSQ alive even during
         // long credential retries, without a second 6144-byte worker stack.
         position_subscriber_->Poll();
+        PollBlueScan();
         if (interrupt_on_network_loss && !IsNetworkAvailable()) break;
         const int64_t remaining_ms = (deadline - esp_timer_get_time()) / 1000;
         if (remaining_ms <= 0) break;
@@ -432,6 +506,7 @@ void LocationMqttClient::Run() {
     uint32_t credential_failures = 0;
     while (!stop_requested_) {
         position_subscriber_->Poll();
+        PollBlueScan();
         if (!IsNetworkAvailable()) {
             credential_failures = 0;
             SetScreenDiagnostic("BIZ MQTT WAIT NET", false);
@@ -681,6 +756,101 @@ bool LocationMqttClient::FetchCredentials(const std::string& cab_guid,
              credentials.client_id.c_str(), credentials.pub_topic.c_str(),
              credentials.subscribe_topic.c_str(), credentials.expires_in);
     return true;
+}
+
+void LocationMqttClient::CloseBlueScanSocket() {
+    if (blue_scan_socket_ < 0) return;
+    close(blue_scan_socket_);
+    blue_scan_socket_ = -1;
+}
+
+void LocationMqttClient::PollBlueScan() {
+    const auto status = [this](const char* text) {
+        if (auto* display = board_.GetDisplay()) {
+            display->SetDiagnosticStatus(DiagnosticChannel::BlueScan, text);
+        }
+    };
+    esp_netif_ip_info_t ip{};
+    if (!board_.GetRndisIpInfo(ip)) {
+        CloseBlueScanSocket();
+        blue_scan_local_ip_ = blue_scan_gateway_ = 0;
+        blue_scan_next_send_us_ = 0;
+        status("BLUE WAIT IP");
+        return;
+    }
+    if (blue_scan_local_ip_ != ip.ip.addr || blue_scan_gateway_ != ip.gw.addr) {
+        CloseBlueScanSocket();
+        blue_scan_local_ip_ = ip.ip.addr;
+        blue_scan_gateway_ = ip.gw.addr;
+        blue_scan_next_send_us_ = 0;
+    }
+
+    const int64_t now = esp_timer_get_time();
+    if (blue_scan_socket_ >= 0) {
+        sockaddr_in sender{};
+        socklen_t sender_size = sizeof(sender);
+        char reply[32];
+        const auto size = recvfrom(blue_scan_socket_, reply, sizeof(reply), MSG_DONTWAIT,
+                                   reinterpret_cast<sockaddr*>(&sender), &sender_size);
+        if (size > 0 && size < static_cast<ssize_t>(sizeof(reply)) &&
+            sender.sin_family == AF_INET && sender.sin_addr.s_addr == blue_scan_gateway_) {
+            const std::string_view message(reply, size);
+            const auto first = message.find_first_not_of(" \t\r\n");
+            if (first != std::string_view::npos &&
+                message.substr(first, message.find_last_not_of(" \t\r\n") - first + 1) == "OK") {
+                char diagnostic[24];
+                std::snprintf(diagnostic, sizeof(diagnostic), "BLUE OK %d", blue_scan_sent_count_);
+                status(diagnostic);
+                ESP_LOGI(kTag, "BlueScan acknowledged, beacons=%d", blue_scan_sent_count_);
+                CloseBlueScanSocket();
+                return;
+            }
+        }
+        if (size < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            ESP_LOGW(kTag, "BlueScan UDP receive failed: errno=%d", errno);
+            status("BLUE UDP ERROR");
+        } else if (now >= blue_scan_ack_deadline_us_) {
+            ESP_LOGW(kTag, "BlueScan UDP ACK timeout");
+            status("BLUE NO ACK");
+        } else {
+            return;
+        }
+        CloseBlueScanSocket();
+        return;
+    }
+    if (now < blue_scan_next_send_us_) return;
+    blue_scan_next_send_us_ = now + kBlueScanIntervalUs;
+
+    auto list = BuildBleBeaconList("mac");
+    std::unique_ptr<char, decltype(&cJSON_free)> json(list ? cJSON_PrintUnformatted(list.get()) : nullptr, cJSON_free);
+    if (!json) {
+        status("BLUE JSON ERROR");
+        return;
+    }
+
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = blue_scan_local_ip_;
+    sockaddr_in gateway{};
+    gateway.sin_family = AF_INET;
+    gateway.sin_port = htons(kBlueScanPort);
+    gateway.sin_addr.s_addr = blue_scan_gateway_;
+    const size_t length = std::strlen(json.get());
+    blue_scan_socket_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (blue_scan_socket_ < 0 ||
+        bind(blue_scan_socket_, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0 ||
+        sendto(blue_scan_socket_, json.get(), length, MSG_DONTWAIT,
+               reinterpret_cast<const sockaddr*>(&gateway), sizeof(gateway)) != static_cast<ssize_t>(length)) {
+        ESP_LOGW(kTag, "BlueScan UDP send failed: errno=%d", errno);
+        CloseBlueScanSocket();
+        status("BLUE UDP ERROR");
+        return;
+    }
+    blue_scan_sent_count_ = cJSON_GetArraySize(list.get());
+    blue_scan_ack_deadline_us_ = esp_timer_get_time() + kBlueScanAckTimeoutUs;
+    status("BLUE WAIT OK");
+    ESP_LOGI(kTag, "BlueScan sent to " IPSTR ":%u, beacons=%d", IP2STR(&ip.gw),
+             static_cast<unsigned>(kBlueScanPort), blue_scan_sent_count_);
 }
 
 bool LocationMqttClient::StartMqtt(const Credentials& credentials,
@@ -1472,7 +1642,7 @@ bool LocationMqttClient::PublishOnlineReport() {
     AddString(root, "Playback Duration", std::to_string(user_playback_seconds));
     AddString(root, "Conversation Count", std::to_string(user_conversations));
     AddString(root, "Role", role);
-    cJSON_AddArrayToObject(root, "bleBeacons");
+    const int beacon_count = AddBleBeaconReport(root);
 
     char* payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -1489,11 +1659,13 @@ bool LocationMqttClient::PublishOnlineReport() {
     cJSON_free(payload);
     if (message_id >= 0) {
         ++online_report_count_;
-        if (display) {
+        if (display && beacon_count >= 0) {
             char diagnostic[40];
-            std::snprintf(diagnostic, sizeof(diagnostic), "KJ TX #%lu",
-                          static_cast<unsigned long>(online_report_count_));
+            std::snprintf(diagnostic, sizeof(diagnostic), "KJ TX #%lu BLE=%d",
+                          static_cast<unsigned long>(online_report_count_), beacon_count);
             display->SetDiagnosticStatus(DiagnosticChannel::OnlineReport, diagnostic);
+        } else if (display) {
+            display->SetDiagnostic(DiagnosticChannel::OnlineReport, "KJ BLE NO MEM");
         }
     } else if (display) {
         display->SetDiagnostic(DiagnosticChannel::OnlineReport, "KJ SEND ERROR");

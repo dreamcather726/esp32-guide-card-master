@@ -30,6 +30,7 @@ public:
     void Stop();
     void ReplayContent(bool previous);
     void RequestOnlineReport() { report_requested_ = true; }
+    static bool RecordBleBeacon(const char (&mac)[18], int rssi);
 
 private:
     struct Credentials {
@@ -57,6 +58,12 @@ private:
     Credentials active_credentials_;
     std::unique_ptr<SdContentManager> content_manager_;
     std::unique_ptr<PositionSubscriber> position_subscriber_;
+    int blue_scan_socket_ = -1;
+    uint32_t blue_scan_local_ip_ = 0;
+    uint32_t blue_scan_gateway_ = 0;
+    int64_t blue_scan_next_send_us_ = 0;
+    int64_t blue_scan_ack_deadline_us_ = 0;
+    int blue_scan_sent_count_ = 0;
 
     std::string physical_imei_;
     std::string cab_guid_;
@@ -86,6 +93,8 @@ private:
     void SetScreenDiagnostic(const char* message, bool fault = true);
     bool IsNetworkAvailable() const;
     bool WaitOrStop(uint32_t delay_ms, bool interrupt_on_network_loss = false);
+    void PollBlueScan();
+    void CloseBlueScanSocket();
     bool FetchCredentials(const std::string& cab_guid,
                           Credentials& credentials);
     bool StartMqtt(const Credentials& credentials,

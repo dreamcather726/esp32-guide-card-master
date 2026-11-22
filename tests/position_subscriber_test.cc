@@ -9,6 +9,12 @@
 #include <mutex>
 #include <cstdio>
 #include <memory>
+#include <string_view>
+#include <arpa/inet.h>
+#include <unistd.h>
+
+#define IPSTR "%u.%u.%u.%u"
+#define IP2STR(address) 0u, 0u, 0u, 0u
 
 using esp_err_t = int;
 constexpr int ESP_OK = 0, pdPASS = 1;
@@ -119,6 +125,7 @@ struct Display {
     int updates = 0;
     std::string business_diagnostic, position_diagnostic;
     std::string report_diagnostic;
+    std::string blue_scan_diagnostic;
     bool report_fault = false;
     void SetDiagnostic(DiagnosticChannel channel, const char* message) {
         SetDiagnosticStatus(channel, message);
@@ -127,6 +134,7 @@ struct Display {
     void SetDiagnosticStatus(DiagnosticChannel channel, const char* message) {
         if (channel == DiagnosticChannel::BusinessMqtt) business_diagnostic = message;
         if (channel == DiagnosticChannel::PositionMqtt) position_diagnostic = message;
+        if (channel == DiagnosticChannel::BlueScan) blue_scan_diagnostic = message;
         if (channel == DiagnosticChannel::OnlineReport) {
             report_diagnostic = message;
             report_fault = false;
@@ -142,13 +150,21 @@ struct Board {
 namespace ml307_at {
 static bool IsImei(const std::string& value) { return value.size() == 15; }
 }
+struct esp_netif_ip_info_t {
+    struct { uint32_t addr; } ip, gw;
+};
 struct RndisBoard {
     Display display;
     bool cellular = true, ready = true;
+    esp_netif_ip_info_t rndis_address{};
     std::string imei = "864479086534998";
     Display* GetDisplay() { return &display; }
     bool IsCellularNetwork() const { return cellular; }
     bool IsNetworkReady() const { return ready; }
+    bool GetRndisIpInfo(esp_netif_ip_info_t& info) const {
+        info = rndis_address;
+        return ready && info.ip.addr && info.gw.addr;
+    }
     std::string GetImei() const { return imei; }
     struct Binding {
         std::string user_guid, boot_id, usage_session_id;
@@ -256,8 +272,33 @@ int main() {
         };
         const auto json = report();
         assert(cJSON_GetArraySize(beacons(json.get())) == 0);
-        assert(board.display.report_diagnostic == "KJ TX #1" && !board.display.report_fault);
+        assert(board.display.report_diagnostic == "KJ TX #1 BLE=0" && !board.display.report_fault);
         assert(std::string(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json.get(), "macAddress"))) == "AA:BB:CC:DD:EE:FF");
+
+        const auto first_seen = now_us;
+        assert(!LocationMqttClient::RecordBleBeacon("D9:62:63:00:00:0D", -20));
+        assert(!LocationMqttClient::RecordBleBeacon("D9:62:62:00:00:0E", 127));
+        assert(LocationMqttClient::RecordBleBeacon("D9:62:62:00:00:0D", -83));
+        assert(LocationMqttClient::RecordBleBeacon("00:D9:62:62:00:0F", -65));
+        now_us += 5LL * 1000000;
+        assert(LocationMqttClient::RecordBleBeacon("D9:62:62:00:00:0D", -70));
+
+        const auto matched = report();
+        const auto* samples = beacons(matched.get());
+        assert(cJSON_GetArraySize(samples) == 2);
+        const auto* first = cJSON_GetArrayItem(samples, 0);
+        assert(std::string(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(first, "macAddress"))) == "D9:62:62:00:00:0D");
+        assert(cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(first, "rssi")) == -70);
+        const auto* second = cJSON_GetArrayItem(samples, 1);
+        assert(std::string(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(second, "macAddress"))) == "00:D9:62:62:00:0F");
+        assert(board.display.report_diagnostic == "KJ TX #2 BLE=2" && !board.display.report_fault);
+
+        now_us = first_seen + 90LL * 1000000;
+        const auto partly_expired = report();
+        assert(cJSON_GetArraySize(beacons(partly_expired.get())) == 1);
+        now_us += 5LL * 1000000;
+        const auto expired = report();
+        assert(cJSON_GetArraySize(beacons(expired.get())) == 0);
 
         online_publish_result = -1;
         assert(!manager.PublishOnlineReport());
@@ -267,6 +308,67 @@ int main() {
         manager.connected_ = false;
         std::cout << "PASS KJ publication: device MAC, report status and empty beacon field\n";
     }
+    {
+        RndisBoard board;
+        LocationMqttClient manager(board, [] { return true; });
+        manager.PollBlueScan();
+        assert(board.display.blue_scan_diagnostic == "BLUE WAIT IP");
+        board.rndis_address.ip.addr = inet_addr("127.0.0.2");
+        board.rndis_address.gw.addr = inet_addr("127.0.0.1");
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = board.rndis_address.gw.addr;
+        address.sin_port = htons(kBlueScanPort);
+        const int server = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        assert(server >= 0 && bind(server, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0);
+        const timeval socket_timeout{1, 0};
+        assert(setsockopt(server, SOL_SOCKET, SO_RCVTIMEO, &socket_timeout, sizeof(socket_timeout)) == 0);
+        assert(LocationMqttClient::RecordBleBeacon("D9:62:62:00:00:0D", -83));
+        assert(LocationMqttClient::RecordBleBeacon("D9:62:62:00:00:0E", -65));
+        sockaddr_in peer{};
+        const auto receive = [&] {
+            char packet[1024];
+            socklen_t peer_size = sizeof(peer);
+            const auto size = recvfrom(server, packet, sizeof(packet), 0,
+                                       reinterpret_cast<sockaddr*>(&peer), &peer_size);
+            assert(size > 0 && size < static_cast<ssize_t>(sizeof(packet)));
+            assert(peer.sin_addr.s_addr == board.rndis_address.ip.addr);
+            return std::string(packet, size);
+        };
+        manager.PollBlueScan();
+        assert(board.display.blue_scan_diagnostic == "BLUE WAIT OK");
+        const auto data = receive();
+        std::unique_ptr<cJSON, decltype(&cJSON_Delete)> json(cJSON_Parse(data.c_str()), cJSON_Delete);
+        assert(cJSON_IsArray(json.get()) && cJSON_GetArraySize(json.get()) == 2);
+        const auto* beacon = cJSON_GetArrayItem(json.get(), 0);
+        assert(std::string(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(beacon, "mac"))) == "D9:62:62:00:00:0D");
+        assert(cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(beacon, "rssi")) == -83);
+        assert(!cJSON_GetObjectItemCaseSensitive(beacon, "macAddress"));
+        assert(sendto(server, "OK\r\n", 4, 0, reinterpret_cast<const sockaddr*>(&peer), sizeof(peer)) == 4);
+        manager.PollBlueScan();
+        assert(board.display.blue_scan_diagnostic == "BLUE OK 2");
+        now_us += kBlueScanIntervalUs;
+        manager.PollBlueScan();
+        receive();
+        assert(sendto(server, "ERROR", 5, 0, reinterpret_cast<const sockaddr*>(&peer), sizeof(peer)) == 5);
+        manager.PollBlueScan();
+        assert(board.display.blue_scan_diagnostic == "BLUE WAIT OK");
+        now_us += kBlueScanAckTimeoutUs;
+        manager.PollBlueScan();
+        assert(board.display.blue_scan_diagnostic == "BLUE NO ACK" && manager.blue_scan_socket_ < 0);
+        board.ready = false;
+        manager.PollBlueScan();
+        assert(board.display.blue_scan_diagnostic == "BLUE WAIT IP");
+        board.ready = true;
+        now_us += kBleBeaconMaxAgeUs;
+        manager.PollBlueScan();
+        assert(receive() == "[]");
+        assert(sendto(server, "OK", 2, 0, reinterpret_cast<const sockaddr*>(&peer), sizeof(peer)) == 2);
+        manager.PollBlueScan();
+        assert(board.display.blue_scan_diagnostic == "BLUE OK 0");
+        close(server);
+    }
+    std::cout << "PASS BlueScan UDP port 8000, source binding, multi-beacon JSON, ACK, timeout and recovery\n";
     {
         RndisBoard board;
         PositionSubscriber subscriber(board, []() { return true; });
