@@ -21,6 +21,7 @@ private:
     std::atomic<bool> stopping_{false};
     int64_t next_start_ = 0;
     int64_t received_at_ = 0;  // Protected by navigation_mutex_, including expiry.
+    int64_t first_report_deadline_ = 0;
     std::mutex navigation_mutex_;
     esp_mqtt_client_handle_t client_ = nullptr;
     bool mqtt_connected_ = false;

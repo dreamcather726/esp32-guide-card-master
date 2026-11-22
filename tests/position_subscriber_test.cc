@@ -288,6 +288,34 @@ int main() {
     {
         RndisBoard board;
         PositionSubscriber subscriber(board, []() { return true; });
+        subscriber.Poll();
+        Connected();
+        EventData ack; ack.client = &client;
+        ErrorData error; error.error_type = MQTT_ERROR_TYPE_SUBSCRIBE_FAILED;
+        ack.error_handle = &error;
+        subscriber.HandleEvent(MQTT_EVENT_SUBSCRIBED, &ack);
+        assert(board.display.position_diagnostic == "POS MQTT SUB DENIED");
+        assert(subscriber.first_report_deadline_ == 0);
+        Connected();
+        error.error_type = 0;
+        subscriber.HandleEvent(MQTT_EVENT_SUBSCRIBED, &ack);
+        assert(board.display.position_diagnostic == "POS MQTT SUB OK");
+        vTaskDelay(59000); subscriber.Poll();
+        assert(board.display.position_diagnostic == "POS MQTT SUB OK");
+        Payload(R"({"fix":1,"latitude":40,"longitude":116,"nsat":15})", true);
+        assert(board.display.position_diagnostic == "POS RETAINED WAIT");
+        vTaskDelay(1000); subscriber.Poll();
+        assert(board.display.position_diagnostic == "POS NO DATA #534998");
+        Payload(R"({"nsat":15,"other":,})");
+        assert(board.display.position_diagnostic == "POS RX BAD PAYLOAD");
+        Payload(R"({"fix":1,"latitude":40,"longitude":116,"nsat":15,"Wifisan":,"Wifisan":[]})");
+        assert(board.display.position_diagnostic == "POS RX FIX=1 SAT=15");
+        assert(board.display.navigation.has_fix && board.display.navigation.satellites == 15);
+    }
+    std::cout << "PASS SUBACK denial, wait timeout, retained/invalid packets and recovery with the ML307C sample\n";
+    {
+        RndisBoard board;
+        PositionSubscriber subscriber(board, []() { return true; });
         int ticks = 0;
         on_delay = [&]() {
             ++ticks;

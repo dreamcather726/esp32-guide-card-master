@@ -10,6 +10,11 @@ int main() {
     assert(std::fabs(status.latitude - 40.0638198833333) < 1e-9);
     assert(std::fabs(status.longitude - 116.420417783333) < 1e-9);
     assert(status.scene.empty());
+    auto modem_sample = sample;
+    modem_sample.insert(modem_sample.find("\"Wifisan\""), "\"Wifisan\":,");
+    assert(position::Parse(modem_sample, status) && status.has_fix && status.satellites == 15);
+    assert(!position::Parse(R"({"nsat":15,"Wifisan":,})", status));
+    assert(!position::Parse(R"({"nsat":15,"unknown":,"Wifisan":[]})", status));
     assert(position::Parse(R"({"latitude":40.1,"longitude":116.2,"fix":1,"nsat":24,"Scene":"024812"})", status));
     assert(status.scene == "024812" && status.has_fix && status.satellites == 24);
     assert(position::Parse(R"({"payload":{"latitude":0,"longitude":116.2,"fix":1,"nsat":"0","scene":24812}})", status));
@@ -35,22 +40,24 @@ int main() {
     assert(!position::Parse(std::string(4097, 'x'), status));
 
     position::Message message;
+    using Result = position::Message::Result;
     const std::string topic = "topic/864479086534998/position";
     auto feed = [&](const char* incoming, const std::string& bytes, int offset, int total, bool retained = false) {
         return message.Feed(topic, incoming, incoming ? static_cast<int>(std::strlen(incoming)) : 0,
                             bytes.data(), bytes.size(), offset, total, retained, status);
     };
-    assert(!feed("topic/111111111111111/position", sample, 0, sample.size()));
-    assert(!feed(topic.c_str(), sample, 0, sample.size(), true));
-    assert(!feed(topic.c_str(), sample.substr(0, 20), 0, sample.size()));
-    assert(feed(nullptr, sample.substr(20), 20, sample.size()) && status.satellites == 15);
-    assert(!feed(topic.c_str(), sample.substr(0, 20), 0, sample.size()));
-    assert(!feed(nullptr, sample.substr(21), 21, sample.size()));
-    assert(!feed(topic.c_str(), sample, 0, 5000));
-    assert(!feed(topic.c_str(), sample.substr(0, 20), 0, sample.size()));
+    assert(feed("topic/111111111111111/position", sample, 0, sample.size()) == Result::Ignored);
+    assert(feed(topic.c_str(), sample, 0, sample.size(), true) == Result::Retained);
+    assert(feed(topic.c_str(), sample.substr(0, 20), 0, sample.size()) == Result::Partial);
+    assert(feed(nullptr, sample.substr(20), 20, sample.size()) == Result::Position && status.satellites == 15);
+    assert(feed(topic.c_str(), sample.substr(0, 20), 0, sample.size()) == Result::Partial);
+    assert(feed(nullptr, sample.substr(21), 21, sample.size()) == Result::BadPacket);
+    assert(feed(topic.c_str(), sample, 0, 5000) == Result::BadPacket);
+    assert(feed(topic.c_str(), "bad", 0, 3) == Result::BadPayload);
+    assert(feed(topic.c_str(), sample.substr(0, 20), 0, sample.size()) == Result::Partial);
     message.Reset();
-    assert(!feed(nullptr, sample.substr(20), 20, sample.size()));
-    assert(feed(topic.c_str(), sample, 0, sample.size()));
+    assert(feed(nullptr, sample.substr(20), 20, sample.size()) == Result::Ignored);
+    assert(feed(topic.c_str(), sample, 0, sample.size()) == Result::Position);
 
     for (int csq = -1; csq <= 100; ++csq) {
         const int expected = csq < 1 || csq > 31 ? 0 : csq > 27 ? 4 : csq >= 16 ? 3 : csq >= 8 ? 2 : 1;

@@ -31,6 +31,8 @@
 
 固定 topic 之外的消息、retained 定位、超过 4096 字节、错误分片顺序、非法 JSON 不更新位置。支持 ESP MQTT 将一条 JSON 拆成多次 DATA 回调。断开连接或 90 秒未收到有效报文时，清除旧卫星数和 Scene，恢复未定位状态。坐标不写到日志或 NVS。
 
+2.1.46 的诊断页区分订阅拒绝 `POS MQTT SUB DENIED`、订阅后 60 秒未收到实时数据 `POS NO DATA #XXXXXX`、旧保留消息 `POS RETAINED WAIT` 和无效报文 `POS RX BAD PAYLOAD` / `POS RX BAD PACKET`。`XXXXXX` 是订阅主题所用 IMEI 的后六位，完整主题见串口 `[SUBSCRIBE]`。针对样例中连续出现的 `"Wifisan":,"Wifisan":[]`，解析会跳过第一个缺少值的字段，其余字段继续按原规则校验。
+
 旧业务客户端对 `cabinet/position/...` 的订阅为兼容保留，但不再用业务控制或旧定位报文覆盖直接 ML307C 定位状态。
 
 ## 四角状态

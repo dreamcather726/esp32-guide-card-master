@@ -40,6 +40,20 @@ inline bool Parse(const std::string& text, NavigationStatus& result) {
     if (text.empty() || text.size() > 4096) return false;
     const char* end = nullptr;
     cJSON* root = cJSON_ParseWithLengthOpts(text.c_str(), text.size() + 1, &end, true);
+    if (!root && end && *end == ',') {
+        // The ML307C sample repeats Wifisan with a missing first value. Skip
+        // only that exact empty field at the parser's failure location.
+        constexpr char key[] = "\"Wifisan\":";
+        constexpr char duplicate[] = ",\"Wifisan\":[]";
+        constexpr size_t key_length = sizeof(key) - 1;
+        const size_t offset = end - text.c_str();
+        if (offset >= key_length && text.compare(offset - key_length, key_length, key) == 0 &&
+            text.compare(offset, sizeof(duplicate) - 1, duplicate) == 0) {
+            auto corrected = text;
+            corrected.erase(offset - key_length, key_length + 1);
+            root = cJSON_ParseWithLengthOpts(corrected.c_str(), corrected.size() + 1, nullptr, true);
+        }
+    }
     if (!root) return false;
     const cJSON* body = cJSON_GetObjectItemCaseSensitive(root, "payload");
     if (!cJSON_IsObject(body)) body = root;
@@ -90,25 +104,29 @@ inline int SignalBars(int csq) {
 // retained messages and oversized messages without buffering unbounded data.
 class Message {
 public:
+    enum class Result { Ignored, Partial, Retained, BadPacket, BadPayload, Position };
     void Reset() { bytes_.clear(); total_ = 0; active_ = false; }
-    bool Feed(const std::string& expected_topic, const char* topic, int topic_length,
-              const char* data, int length, int offset, int total, bool retained,
-              NavigationStatus& status) {
+    Result Feed(const std::string& expected_topic, const char* topic, int topic_length,
+                const char* data, int length, int offset, int total, bool retained,
+                NavigationStatus& status) {
         if (offset == 0) {
             Reset();
-            if (!topic || topic_length <= 0 || std::string(topic, topic_length) != expected_topic ||
-                retained || total <= 0 || total > 4096) return false;
+            if (!topic || topic_length <= 0 || std::string(topic, topic_length) != expected_topic)
+                return Result::Ignored;
+            if (retained) return Result::Retained;
+            if (total <= 0 || total > 4096) return Result::BadPacket;
             active_ = true; total_ = total;
         }
-        if (!active_ || !data || length < 0 || offset < 0 || total != total_ ||
+        if (!active_) return Result::Ignored;
+        if (!data || length <= 0 || offset < 0 || total != total_ ||
             offset != static_cast<int>(bytes_.size()) || length > total_ - offset) {
-            Reset(); return false;
+            Reset(); return Result::BadPacket;
         }
         bytes_.append(data, static_cast<size_t>(length));
-        if (static_cast<int>(bytes_.size()) != total_) return false;
+        if (static_cast<int>(bytes_.size()) != total_) return Result::Partial;
         const bool parsed = Parse(bytes_, status);
         Reset();
-        return parsed;
+        return parsed ? Result::Position : Result::BadPayload;
     }
 private:
     std::string bytes_;

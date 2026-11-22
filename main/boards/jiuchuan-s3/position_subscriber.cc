@@ -8,6 +8,7 @@
 
 namespace {
 constexpr const char* kTag = "PositionMqtt";
+constexpr int64_t kFirstReportTimeoutUs = 60LL * 1000 * 1000;
 constexpr int64_t kPositionTimeoutUs = 90LL * 1000 * 1000;
 }
 
@@ -30,6 +31,7 @@ void PositionSubscriber::SetScreenDiagnostic(const char* message, bool fault) {
 void PositionSubscriber::ClearPosition() {
     std::lock_guard<std::mutex> lock(navigation_mutex_);
     received_at_ = 0;
+    first_report_deadline_ = 0;
     if (auto* display = board_.GetDisplay()) display->SetNavigationStatus(NavigationStatus{});
 }
 
@@ -115,6 +117,13 @@ void PositionSubscriber::Poll() {
     // A connected broker can silently stop receiving modem telemetry.
     {
         std::lock_guard<std::mutex> lock(navigation_mutex_);
+        if (first_report_deadline_ != 0 && now >= first_report_deadline_) {
+            first_report_deadline_ = 0;
+            char diagnostic[40];
+            std::snprintf(diagnostic, sizeof(diagnostic), "POS NO DATA #%s", imei_.c_str() + imei_.size() - 6);
+            SetScreenDiagnostic(diagnostic, false);
+            ESP_LOGW(kTag, "No live position report in 60 seconds on topic=%s", topic_.c_str());
+        }
         const int64_t last = received_at_;
         if (last > 0 && now - last >= kPositionTimeoutUs) {
             received_at_ = 0;
@@ -140,7 +149,19 @@ void PositionSubscriber::HandleEvent(int32_t id, esp_mqtt_event_handle_t event) 
         SetScreenDiagnostic(message_id < 0 ? "POS MQTT SUB ERROR" : "POS MQTT WAIT SUBACK", message_id < 0);
         ESP_LOGI(kTag, "[SUBSCRIBE] broker=%s topic=%s message_id=%d", JIUCHUAN_POSITION_MQTT_URI, topic_.c_str(), message_id);
     } else if (id == MQTT_EVENT_SUBSCRIBED) {
-        SetScreenDiagnostic("POS MQTT SUB OK", false);
+        if (event->error_handle && event->error_handle->error_type == MQTT_ERROR_TYPE_SUBSCRIBE_FAILED) {
+            SetScreenDiagnostic("POS MQTT SUB DENIED");
+            ESP_LOGW(kTag, "[SUB_DENIED] broker=%s topic=%s message_id=%d",
+                     JIUCHUAN_POSITION_MQTT_URI, topic_.c_str(), event->msg_id);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(navigation_mutex_);
+            if (received_at_ == 0) {
+                first_report_deadline_ = esp_timer_get_time() + kFirstReportTimeoutUs;
+                SetScreenDiagnostic("POS MQTT SUB OK", false);
+            }
+        }
         ESP_LOGI(kTag, "[SUBSCRIBED] broker=%s topic=%s message_id=%d", JIUCHUAN_POSITION_MQTT_URI, topic_.c_str(), event->msg_id);
     } else if (id == MQTT_EVENT_DISCONNECTED) {
         const bool was_connected = mqtt_connected_;
@@ -151,15 +172,26 @@ void PositionSubscriber::HandleEvent(int32_t id, esp_mqtt_event_handle_t event) 
         if (was_connected) SetScreenDiagnostic("POS MQTT OFFLINE");
     } else if (id == MQTT_EVENT_DATA) {
         NavigationStatus status;
-        if (message_.Feed(topic_, event->topic, event->topic_len, event->data, event->data_len,
-                          event->current_data_offset, event->total_data_len, event->retain, status)) {
-            std::lock_guard<std::mutex> lock(navigation_mutex_);
+        using Result = position::Message::Result;
+        const auto result = message_.Feed(topic_, event->topic, event->topic_len, event->data, event->data_len,
+                                          event->current_data_offset, event->total_data_len, event->retain, status);
+        if (result == Result::Ignored || result == Result::Partial) return;
+        std::lock_guard<std::mutex> lock(navigation_mutex_);
+        if (result == Result::Position) {
+            first_report_deadline_ = 0;
             received_at_ = esp_timer_get_time();
             if (auto* display = board_.GetDisplay()) display->SetNavigationStatus(status);
             char diagnostic[40];
             std::snprintf(diagnostic, sizeof(diagnostic), "POS RX FIX=%d SAT=%d", status.has_fix, status.satellites);
             SetScreenDiagnostic(diagnostic, false);
             ESP_LOGD(kTag, "Position received: fix=%d nsat=%d", status.has_fix, status.satellites);
+        } else if (result == Result::Retained) {
+            if (received_at_ == 0) SetScreenDiagnostic("POS RETAINED WAIT", false);
+        } else {
+            first_report_deadline_ = 0;
+            SetScreenDiagnostic(result == Result::BadPayload ? "POS RX BAD PAYLOAD" : "POS RX BAD PACKET", false);
+            ESP_LOGW(kTag, "Position report rejected: topic=%s length=%d reason=%s",
+                     topic_.c_str(), event->total_data_len, result == Result::BadPayload ? "payload" : "packet");
         }
     } else if (id == MQTT_EVENT_ERROR) {
         mqtt_connected_ = false;
