@@ -30,6 +30,7 @@ public:
     void Stop();
     void ReplayContent(bool previous);
     void RequestOnlineReport() { report_requested_ = true; }
+    static bool RecordBleBeacon(const char (&mac)[18], int rssi);
 
 private:
     struct Credentials {

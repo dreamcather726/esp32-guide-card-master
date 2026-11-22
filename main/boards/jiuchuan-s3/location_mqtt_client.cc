@@ -22,6 +22,7 @@
 #include <http.h>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <climits>
@@ -58,6 +59,40 @@ constexpr uint32_t kReconnectGraceMs = 60000;
 constexpr uint32_t kOnlineReportIntervalSeconds = 60;
 constexpr int kDefaultCredentialSeconds = 3600;
 constexpr int kCredentialRefreshMarginSeconds = 300;
+
+struct BleBeaconSample {
+    char mac[18]{};
+    int rssi = 0;
+    int64_t seen_us = 0;
+};
+
+constexpr int64_t kBleBeaconMaxAgeUs = 90LL * 1000 * 1000;
+std::mutex ble_beacon_mutex;
+std::array<BleBeaconSample, 16> ble_beacons{};
+
+int AddBleBeaconReport(cJSON* root) {
+    const auto snapshot = [] {
+        std::lock_guard lock(ble_beacon_mutex);
+        return ble_beacons;
+    }();
+    const int64_t now = esp_timer_get_time();
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> items(cJSON_CreateArray(), cJSON_Delete);
+    if (!items) return -1;
+    for (const auto& sample : snapshot) {
+        if (sample.mac[0] == '\0' || now - sample.seen_us >= kBleBeaconMaxAgeUs) continue;
+        std::unique_ptr<cJSON, decltype(&cJSON_Delete)> entry(cJSON_CreateObject(), cJSON_Delete);
+        if (!entry || !cJSON_AddStringToObject(entry.get(), "macAddress", sample.mac) ||
+            !cJSON_AddNumberToObject(entry.get(), "rssi", sample.rssi) ||
+            !cJSON_AddItemToArray(items.get(), entry.get())) {
+            return -1;
+        }
+        entry.release();
+    }
+    const int count = cJSON_GetArraySize(items.get());
+    if (!cJSON_AddItemToObject(root, "bleBeacons", items.get())) return -1;
+    items.release();
+    return count;
+}
 
 std::string Trim(std::string value) {
     auto is_space = [](unsigned char ch) { return std::isspace(ch) != 0; };
@@ -331,6 +366,29 @@ void AddString(cJSON* root, const char* key, const std::string& value) {
 }
 
 }  // namespace
+
+bool LocationMqttClient::RecordBleBeacon(const char (&mac)[18], int rssi) {
+    // The scanner formats addresses in uppercase and 127 means RSSI is unavailable.
+    if (std::strstr(mac, "D9:62:62") == nullptr || rssi == 127) return false;
+
+    std::lock_guard lock(ble_beacon_mutex);
+    auto slot = std::find_if(ble_beacons.begin(), ble_beacons.end(), [&](const BleBeaconSample& sample) {
+        return std::strcmp(sample.mac, mac) == 0;
+    });
+    if (slot == ble_beacons.end()) {
+        slot = std::min_element(ble_beacons.begin(), ble_beacons.end(),
+            [](const BleBeaconSample& left, const BleBeaconSample& right) {
+                const bool left_empty = left.mac[0] == '\0';
+                const bool right_empty = right.mac[0] == '\0';
+                if (left_empty != right_empty) return left_empty;
+                return left.seen_us < right.seen_us;
+            });
+        std::memcpy(slot->mac, mac, sizeof(slot->mac));
+    }
+    slot->rssi = rssi;
+    slot->seen_us = esp_timer_get_time();
+    return true;
+}
 
 LocationMqttClient::LocationMqttClient(RndisBoard& board, std::function<bool()> network_ready)
     : board_(board), position_subscriber_(std::make_unique<PositionSubscriber>(board, std::move(network_ready))) {
@@ -1446,7 +1504,7 @@ bool LocationMqttClient::PublishOnlineReport() {
     AddString(root, "Playback Duration", std::to_string(user_playback_seconds));
     AddString(root, "Conversation Count", std::to_string(user_conversations));
     AddString(root, "Role", role);
-    cJSON_AddArrayToObject(root, "bleBeacons");
+    const int beacon_count = AddBleBeaconReport(root);
 
     char* payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -1463,11 +1521,13 @@ bool LocationMqttClient::PublishOnlineReport() {
     cJSON_free(payload);
     if (message_id >= 0) {
         ++online_report_count_;
-        if (display) {
+        if (display && beacon_count >= 0) {
             char diagnostic[40];
-            std::snprintf(diagnostic, sizeof(diagnostic), "KJ TX #%lu",
-                          static_cast<unsigned long>(online_report_count_));
+            std::snprintf(diagnostic, sizeof(diagnostic), "KJ TX #%lu BLE=%d",
+                          static_cast<unsigned long>(online_report_count_), beacon_count);
             display->SetDiagnosticStatus(DiagnosticChannel::OnlineReport, diagnostic);
+        } else if (display) {
+            display->SetDiagnostic(DiagnosticChannel::OnlineReport, "KJ BLE NO MEM");
         }
     } else if (display) {
         display->SetDiagnostic(DiagnosticChannel::OnlineReport, "KJ SEND ERROR");

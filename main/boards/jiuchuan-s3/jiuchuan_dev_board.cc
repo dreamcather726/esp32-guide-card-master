@@ -27,6 +27,11 @@
 #include <http.h>
 #include <sdmmc_cmd.h>
 
+#ifdef CONFIG_BT_NIMBLE_ROLE_OBSERVER
+#include <host/ble_hs.h>
+#include <host/util/util.h>
+#include <nimble/nimble_port.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -85,6 +90,84 @@ bool UseEarlyUsbPowerOnRetry() {
     return modem_retry_marker == kModemRetryMarker;
 }
 
+#ifdef CONFIG_BT_NIMBLE_ROLE_OBSERVER
+constexpr const char* kBeaconTag = "BleBeacon";
+
+int OnBleBeaconReport(ble_gap_event* event, void*) {
+    if (event->type != BLE_GAP_EVENT_DISC) return 0;
+    const auto& report = event->disc;
+    const auto* address = report.addr.val;
+    char mac[18];
+    std::snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                  address[5], address[4], address[3], address[2], address[1], address[0]);
+    if (!LocationMqttClient::RecordBleBeacon(mac, report.rssi)) return 0;
+
+    const char* type = "unknown";
+    switch (report.addr.type) {
+        case BLE_ADDR_PUBLIC: type = "public"; break;
+        case BLE_ADDR_RANDOM: type = "random"; break;
+        case BLE_ADDR_PUBLIC_ID: type = "public_identity"; break;
+        case BLE_ADDR_RANDOM_ID: type = "random_identity"; break;
+    }
+    char diagnostic[40];
+    std::snprintf(diagnostic, sizeof(diagnostic), "BLE %s %d", mac, report.rssi);
+    Board::GetInstance().GetDisplay()->SetDiagnosticStatus(DiagnosticChannel::Ble, diagnostic);
+    ESP_LOGI(kBeaconTag, "MAC=%s type=%s RSSI=%d dBm", mac, type, report.rssi);
+    return 0;
+}
+
+void OnBleBeaconSync() {
+    uint8_t own_address_type = 0;
+    int result = ble_hs_util_ensure_addr(0);
+    if (result == 0) result = ble_hs_id_infer_auto(0, &own_address_type);
+    if (result == 0) {
+        ble_gap_disc_params scan = {};
+        scan.passive = 1;
+        scan.filter_duplicates = 1;
+        scan.itvl = 160;
+        scan.window = 48;
+        result = ble_gap_disc(own_address_type, BLE_HS_FOREVER, &scan, OnBleBeaconReport, nullptr);
+    }
+    auto* display = Board::GetInstance().GetDisplay();
+    if (result == 0) {
+        display->SetDiagnosticStatus(DiagnosticChannel::Ble, "BLE SCAN D9:62:62");
+        ESP_LOGI(kBeaconTag, "Passive BLE scan started");
+    } else if (result != BLE_HS_EALREADY) {
+        char diagnostic[40];
+        std::snprintf(diagnostic, sizeof(diagnostic), "BLE SCAN E%d", result);
+        display->SetDiagnostic(DiagnosticChannel::Ble, diagnostic);
+        ESP_LOGE(kBeaconTag, "BLE scan failed: %d", result);
+    }
+}
+
+void StartBleBeaconScan() {
+    static bool started = false;
+    if (started) return;
+    const esp_err_t result = nimble_port_init();
+    auto* display = Board::GetInstance().GetDisplay();
+    if (result != ESP_OK) {
+        char diagnostic[40];
+        std::snprintf(diagnostic, sizeof(diagnostic), "BLE INIT E%X", static_cast<unsigned>(result));
+        display->SetDiagnostic(DiagnosticChannel::Ble, diagnostic);
+        ESP_LOGE(kBeaconTag, "BLE init failed: %s", esp_err_to_name(result));
+        return;
+    }
+    ble_hs_cfg.sync_cb = OnBleBeaconSync;
+    if (xTaskCreatePinnedToCore([](void*) {
+            nimble_port_run();
+            vTaskDelete(nullptr);
+        }, "nimble_host", CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE, nullptr, configMAX_PRIORITIES - 4,
+        nullptr, CONFIG_BT_NIMBLE_PINNED_TO_CORE) != pdPASS) {
+        display->SetDiagnostic(DiagnosticChannel::Ble, "BLE TASK NO MEM");
+        ESP_LOGE(kBeaconTag, "BLE host task creation failed; internal_largest=%u",
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+        const auto cleanup = nimble_port_deinit();
+        if (cleanup != ESP_OK) ESP_LOGE(kBeaconTag, "BLE cleanup failed: %s", esp_err_to_name(cleanup));
+        return;
+    }
+    started = true;
+}
+#endif
 
 bool PrepareBoardForStartup() {
     gpio_deep_sleep_hold_dis();
@@ -2043,7 +2126,16 @@ public:
         }
     }
 
+    void OnUsbAtReady() override {
+#ifdef CONFIG_BT_NIMBLE_ROLE_OBSERVER
+        Application::GetInstance().Schedule(StartBleBeaconScan);
+#endif
+    }
+
     void StartNetwork() override {
+#ifdef CONFIG_BT_NIMBLE_ROLE_OBSERVER
+        GetDisplay()->SetDiagnosticStatus(DiagnosticChannel::Ble, "BLE WAIT AT");
+#endif
         // The base constructor already reserves the USB host interrupt.
         // Mount TF and try local resources before starting USB RNDIS transport.
         if (!sd_card_) {

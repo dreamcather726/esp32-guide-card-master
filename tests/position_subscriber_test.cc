@@ -253,8 +253,33 @@ int main() {
         };
         const auto json = report();
         assert(cJSON_GetArraySize(beacons(json.get())) == 0);
-        assert(board.display.report_diagnostic == "KJ TX #1" && !board.display.report_fault);
+        assert(board.display.report_diagnostic == "KJ TX #1 BLE=0" && !board.display.report_fault);
         assert(std::string(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json.get(), "macAddress"))) == "AA:BB:CC:DD:EE:FF");
+
+        const auto first_seen = now_us;
+        assert(!LocationMqttClient::RecordBleBeacon("D9:62:63:00:00:0D", -20));
+        assert(!LocationMqttClient::RecordBleBeacon("D9:62:62:00:00:0E", 127));
+        assert(LocationMqttClient::RecordBleBeacon("D9:62:62:00:00:0D", -83));
+        assert(LocationMqttClient::RecordBleBeacon("00:D9:62:62:00:0F", -65));
+        now_us += 5LL * 1000000;
+        assert(LocationMqttClient::RecordBleBeacon("D9:62:62:00:00:0D", -70));
+
+        const auto matched = report();
+        const auto* samples = beacons(matched.get());
+        assert(cJSON_GetArraySize(samples) == 2);
+        const auto* first = cJSON_GetArrayItem(samples, 0);
+        assert(std::string(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(first, "macAddress"))) == "D9:62:62:00:00:0D");
+        assert(cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(first, "rssi")) == -70);
+        const auto* second = cJSON_GetArrayItem(samples, 1);
+        assert(std::string(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(second, "macAddress"))) == "00:D9:62:62:00:0F");
+        assert(board.display.report_diagnostic == "KJ TX #2 BLE=2" && !board.display.report_fault);
+
+        now_us = first_seen + 90LL * 1000000;
+        const auto partly_expired = report();
+        assert(cJSON_GetArraySize(beacons(partly_expired.get())) == 1);
+        now_us += 5LL * 1000000;
+        const auto expired = report();
+        assert(cJSON_GetArraySize(beacons(expired.get())) == 0);
 
         online_publish_result = -1;
         assert(!manager.PublishOnlineReport());

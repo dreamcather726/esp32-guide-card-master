@@ -40,7 +40,7 @@ idf_component_register(SRCS ${SOURCES}
     INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg"
                  "audio" "protocols" "boards/common"
     PRIV_REQUIRES app_update efuse esp_event esp_netif esp_pm esp_psram esp_timer
-                  driver esp_lcd fatfs sdmmc json mqtt nvs_flash usb spi_flash
+                  bt driver esp_lcd fatfs sdmmc json mqtt nvs_flash usb spi_flash
     WHOLE_ARCHIVE
 )
 target_compile_definitions(${COMPONENT_LIB} PRIVATE

@@ -33,6 +33,16 @@
 
 开机资源沿用 TF 卡上的 `<IMEI>.jpg` 和 `start.wav`。卡上缺失时，4G 就绪后按原地址补下载。TF 写卡故障在诊断页显示已接收字节、已写字节和 SDMMC 错误码。
 
+## BLE 信标
+
+ML307 的 AT 口就绪后，ESP32-S3 开始被动扫描 BLE 广播。MAC 包含 `D9:62:62` 且 RSSI 有效的记录会出现在串口和诊断页。串口示例为 `MAC=D9:62:62:00:00:0D type=public RSSI=-83 dBm`。
+
+业务 MQTT 在 `device/broadcast/online` 的 `KJ` 报文中用 `bleBeacons` 上报匹配结果，每个 MAC 保留最近一次 RSSI，最多 16 个。90 秒内无新采样的记录会过期。诊断页的 `KJ TX #44 BLE=1` 表示第 44 次本地发送包含 1 个信标。
+
+```json
+{"cmd":"KJ","bleBeacons":[{"macAddress":"D9:62:62:00:00:0D","rssi":-83}]}
+```
+
 ## 烧录
 
 使用 ESP-IDF 5.5.4 和仓库根目录的 `sdkconfig.defaults`。完整 BIN 烧录地址为 `0x0`，串口监视器使用 115200 波特率。编译命令见[根目录说明](../../../README.md)。
