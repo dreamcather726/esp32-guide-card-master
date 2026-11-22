@@ -258,7 +258,7 @@ private:
         lv_label_set_long_mode(diagnostic_label_, LV_LABEL_LONG_CLIP);
         lv_obj_set_style_text_font(diagnostic_label_, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(diagnostic_label_, lv_color_white(), 0);
-        lv_obj_set_style_text_line_space(diagnostic_label_, -3, 0);
+        lv_obj_set_style_text_line_space(diagnostic_label_, -4, 0);
         lv_obj_set_style_bg_color(diagnostic_label_, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(diagnostic_label_, LV_OPA_COVER, 0);
         lv_obj_set_style_pad_all(diagnostic_label_, 3, 0);
@@ -289,7 +289,7 @@ private:
         const std::array<const char*, static_cast<size_t>(DiagnosticChannel::Count)> defaults = {
             "VOICE IDLE", "LINK WAIT",
             "USB WAIT", "NET WAIT", "QR WAIT", "WAV WAIT",
-            "BIZ MQTT WAIT", "POS MQTT WAIT", "KJ WAIT",
+            "BLE OFF", "BIZ MQTT WAIT", "POS MQTT WAIT", "KJ WAIT",
         };
         unsigned visible_lines = 0;
         for (size_t i = 0; i < snapshot.size(); ++i) {

@@ -188,7 +188,8 @@ int main() {
     Check(lv_obj_has_flag(board.diagnostic_label_, LV_OBJ_FLAG_HIDDEN), "resolved diagnostics stayed visible");
     board.SetDiagnosticStatus(DiagnosticChannel::Usb, "USB IMEI OK");
     board.SetDiagnosticStatus(DiagnosticChannel::Qr, "QR SAVED TF");
-    board.SetDiagnosticStatus(DiagnosticChannel::OnlineReport, "KJ TX #1");
+    board.SetDiagnosticStatus(DiagnosticChannel::Ble, "BLE D9:62:62:00:00:0D -83");
+    board.SetDiagnosticStatus(DiagnosticChannel::OnlineReport, "KJ TX #1 BLE=1");
     board.RefreshDiagnostics();
     Check(lv_obj_has_flag(board.diagnostic_label_, LV_OBJ_FLAG_HIDDEN), "ordinary status covered normal pages");
     board.ToggleDiagnosticPage();
@@ -196,10 +197,11 @@ int main() {
     Check(board.IsDiagnosticPageOpen(), "diagnostic page did not open");
     Check(std::strcmp(lv_label_get_text(board.diagnostic_label_),
           "VOICE IDLE\nLINK WAIT\nUSB IMEI OK\nNET WAIT\nQR SAVED TF\nWAV WAIT\n"
-          "BIZ MQTT WAIT\nPOS MQTT WAIT\nKJ TX #1") == 0, "diagnostic page missing status");
+          "BLE D9:62:62:00:00:0D -83\nBIZ MQTT WAIT\nPOS MQTT WAIT\nKJ TX #1 BLE=1") == 0,
+          "diagnostic page missing status");
     Check(lv_obj_get_y(board.diagnostic_label_) >= 0 &&
           lv_obj_get_y(board.diagnostic_label_) + lv_obj_get_height(board.diagnostic_label_) <= 135,
-          "nine diagnostic lines do not fit the LCD");
+          "ten diagnostic lines do not fit the LCD");
     board.ToggleDiagnosticPage();
     Check(lv_obj_has_flag(board.diagnostic_label_, LV_OBJ_FLAG_HIDDEN), "diagnostic page did not close");
     board.SetDiagnosticStatus(DiagnosticChannel::Voice, "PTT HELD");
