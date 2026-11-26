@@ -52,7 +52,7 @@ std::string BrokerAddressForLog(const std::string& uri) {
 constexpr const char* kCredentialsUrl =
     "http://mqttak.suji.work:8443/api/credentials";
 constexpr const char* kSettingsNamespace = "cab_mqtt";
-constexpr const char* kOnlineTopic = "device/broadcast/online";
+constexpr const char* kGroupTopicPrefix = "topic/group/";
 // One worker services both clients after the existing startup gate.
 constexpr uint32_t kRetryDelayMs = 2000;
 constexpr uint32_t kUnauthorizedRetryDelayMs = 30000;
@@ -863,13 +863,13 @@ bool LocationMqttClient::StartMqtt(const Credentials& credentials,
     active_credentials_ = credentials;
     physical_imei_ = physical_imei;
     cab_guid_ = cab_guid;
-    command_topic_ = "cabinet/cmd/" + cab_guid_;
-    event_topic_ = "cabinet/event/" + cab_guid_;
-    position_topic_ = "cabinet/position/" + physical_imei_;
-    position_compat_topic_ = "cabinet/position/" + cab_guid_;
+    const std::string topic_prefix = "topic/" + cab_guid_ + "/";
+    command_topic_ = topic_prefix + "cmd";
+    event_topic_ = topic_prefix + "event";
+    position_topic_ = topic_prefix + "position";
     {
         std::lock_guard<std::mutex> state_lock(state_mutex_);
-        group_topic_ = group_id_.empty() ? "" : "device/group/" + group_id_;
+        group_topic_ = group_id_.empty() ? "" : kGroupTopicPrefix + group_id_;
     }
 
     esp_mqtt_client_config_t config = {};
@@ -958,14 +958,8 @@ void LocationMqttClient::SubscribeBusinessTopics(
 
     const int position_id = esp_mqtt_client_subscribe(
         client, position_topic_.c_str(), 0);
-    ESP_LOGI(kTag, "subscribe ML307 position %s, message_id=%d",
+    ESP_LOGI(kTag, "subscribe business position %s, message_id=%d",
              position_topic_.c_str(), position_id);
-    if (position_compat_topic_ != position_topic_) {
-        const int compat_position_id = esp_mqtt_client_subscribe(
-            client, position_compat_topic_.c_str(), 0);
-        ESP_LOGI(kTag, "subscribe S3 position compatibility %s, message_id=%d",
-                 position_compat_topic_.c_str(), compat_position_id);
-    }
 
     std::string group_topic;
     {
@@ -1098,10 +1092,8 @@ void LocationMqttClient::HandleMqttPayload(const std::string& topic,
         message = nested;
     }
 
-    const bool is_position_topic =
-        topic == position_topic_ || topic == position_compat_topic_;
     // Direct ML307C telemetry is handled by PositionSubscriber on its own broker.
-    if (is_position_topic) {
+    if (topic == position_topic_) {
         return;
     }
 
@@ -1131,7 +1123,7 @@ void LocationMqttClient::HandleMqttPayload(const std::string& topic,
                 group_id_ = new_group_id;
                 group_topic_ = group_id_.empty()
                     ? ""
-                    : "device/group/" + group_id_;
+                    : kGroupTopicPrefix + group_id_;
                 settings_changed = true;
             }
             new_group_topic = group_topic_;
@@ -1652,10 +1644,11 @@ bool LocationMqttClient::PublishOnlineReport() {
         return false;
     }
 
+    const std::string online_topic = "topic/" + cab_guid_ + "/online";
     const int message_id = esp_mqtt_client_publish(
-        mqtt_client_, kOnlineTopic, payload, 0, 0, 0);
+        mqtt_client_, online_topic.c_str(), payload, 0, 0, 0);
     ESP_LOGI(kTag, "TX topic=%s message_id=%d payload=%s",
-             kOnlineTopic, message_id, payload);
+             online_topic.c_str(), message_id, payload);
     cJSON_free(payload);
     if (message_id >= 0) {
         ++online_report_count_;

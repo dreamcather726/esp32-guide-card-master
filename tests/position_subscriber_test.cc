@@ -194,7 +194,6 @@ struct RndisBoard {
 constexpr uint32_t kRetryDelayMs = 2000, kUnauthorizedRetryDelayMs = 30000,
     kConnectWaitMs = 30000, kReconnectGraceMs = 60000, kOnlineReportIntervalSeconds = 60;
 constexpr int kCredentialRefreshMarginSeconds = 300;
-constexpr const char* kOnlineTopic = "device/broadcast/online";
 class SdContentManager {};
 struct Application {
     static Application& GetInstance() { static Application instance; return instance; }
@@ -212,10 +211,12 @@ static void GetSdCardSpaceKb(uint64_t&, uint64_t&) {}
 struct SystemInfo { static std::string GetMacAddress() { return "AA:BB:CC:DD:EE:FF"; } };
 struct esp_app_desc_t { char version[32]; };
 static const esp_app_desc_t* esp_app_get_description() { static const esp_app_desc_t info{"2.1.34"}; return &info; }
+static std::string online_topic;
 static std::string online_payload;
 static int online_publish_result = 1;
 static int esp_mqtt_client_publish(Client*, const char* address, const char* payload, int len, int qos, int retain) {
-    assert(std::string(address) == kOnlineTopic && len == 0 && qos == 0 && retain == 0);
+    assert(len == 0 && qos == 0 && retain == 0);
+    online_topic = address;
     online_payload = payload;
     return online_publish_result;
 }
@@ -261,6 +262,7 @@ int main() {
         manager.cab_guid_ = board.imei + "s3";
         const auto report = [&] {
             assert(manager.PublishOnlineReport());
+            assert(online_topic == "topic/" + board.imei + "s3/online");
             std::unique_ptr<cJSON, decltype(&cJSON_Delete)> json(cJSON_Parse(online_payload.c_str()), cJSON_Delete);
             assert(json);
             return json;

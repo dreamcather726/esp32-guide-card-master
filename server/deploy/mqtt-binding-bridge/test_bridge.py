@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 from unittest.mock import Mock, patch
 
-from bridge import Backend, BridgeError, COMMAND, Engine, ONLINE, Runtime, Store, credentials, parse_payload, mqtt_tls_context
+from bridge import Backend, BridgeError, Engine, Runtime, Store, business_topic, credentials, mqtt_tls_context, parse_payload
 
 
 class FakeBackend:
@@ -37,7 +37,8 @@ class EngineTest(unittest.TestCase):
         self.report = {"cmd": "KJ", "cabGuid": "864479086586824s3", "bootID": "boot-1", "groupID": "",
                        "userGUID": "", "bindingState": "unbound", "bindingVersion": 0, "usageSessionID": ""}
         self.cab = self.report["cabGuid"]
-        self.topic = COMMAND + self.cab
+        self.topic = f"topic/{self.cab}/cmd"
+        self.online_topic = f"topic/{self.cab}/online"
 
     def tearDown(self):
         self.store.db.close()
@@ -46,7 +47,7 @@ class EngineTest(unittest.TestCase):
         self.engine.receive(topic or self.topic, json.dumps(msg), **kwargs)
 
     def online(self, **kwargs):
-        self.receive(dict(self.report, **kwargs), ONLINE)
+        self.receive(dict(self.report, **kwargs), self.online_topic)
 
     def assign(self, **kwargs):
         self.receive(dict(userGUID="user-1", groupID="9", **kwargs))
@@ -61,12 +62,24 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.sent[-1][1]["bindingAuto"], "dispatched")
         self.online(userGUID="user-1", bindingVersion=1, usageSessionID="session-1", bindingState="ready")
         self.assertEqual(self.sent[-1][1]["bindingAuto"], "ready")
+        self.assertTrue(all(topic == self.topic for topic, _ in self.sent))
         self.assertIsNone(self.store.get(self.cab))
 
     def test_retained_assignments_and_reports_ignored(self):
-        self.receive(self.report, ONLINE, retained=True)
+        self.receive(self.report, self.online_topic, retained=True)
         self.receive({"userGUID": "user-1"}, retained=True)
         self.assertFalse(self.api.calls)
+        self.assertFalse(self.sent)
+
+    def test_unrelated_topics_and_mismatched_online_identity_are_ignored(self):
+        self.receive(self.report, "device/broadcast/online")
+        self.receive(self.report, "topic/other-cab/online")
+        self.receive(self.report, f"topic/{self.cab}/online/extra")
+        self.receive({"userGUID": "user-1"}, f"cabinet/cmd/{self.cab}")
+        self.receive(dict(self.report, cabGuid="group"), "topic/group/online")
+        self.receive({"userGUID": "user-1"}, "topic/group/cmd")
+        self.assertFalse(self.api.calls)
+        self.assertFalse(self.engine.online)
         self.assertFalse(self.sent)
 
     def test_no_fresh_report_rejects_not_queues(self):
@@ -175,7 +188,7 @@ class EngineTest(unittest.TestCase):
     def test_unsafe_group_and_topic_rejected(self):
         self.online()
         self.receive({"userGUID": "user-1", "groupID": "../9"})
-        self.receive({"userGUID": "user-1"}, COMMAND + "+")
+        self.receive({"userGUID": "user-1"}, "topic/+/cmd")
         self.assertIsNone(self.store.get(self.cab))
 
     def test_retry_backoff_and_expiry(self):
@@ -192,7 +205,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.sent[-1][1]["bindingAuto"], "error")
 
     def test_stale_queued_report_ignored(self):
-        self.receive(self.report, ONLINE, received=self.now-181)
+        self.receive(self.report, self.online_topic, received=self.now-181)
         self.assertFalse(self.api.calls)
 
     def test_backend_mismatched_command_not_published(self):
@@ -501,7 +514,7 @@ else:
                 engine = Engine(api, store, lambda topic, msg: sent.append(msg), lambda: 1001)
                 engine.tick()
                 self.assertFalse(sent)
-                engine.receive(ONLINE, json.dumps({"cmd": "KJ", "cabGuid": "cab", "bootID": "boot-1",
+                engine.receive("topic/cab/online", json.dumps({"cmd": "KJ", "cabGuid": "cab", "bootID": "boot-1",
                     "userGUID": "user-1", "bindingVersion": 1, "usageSessionID": "session-1",
                     "bindingState": "ready", "groupID": "9"}))
                 self.assertFalse(sent)
@@ -624,6 +637,7 @@ class RuntimeTest(unittest.TestCase):
         client = self.runtime.client
         success = SimpleNamespace(is_failure=False)
         client.on_connect(client, None, None, success, None)
+        client.subscribe.assert_called_once_with([("topic/+/online", 1), ("topic/+/cmd", 1)])
         client.on_subscribe(client, None, 1, [success, success], None)
 
     def test_reconnect_deadline_grows_and_caps_even_with_queued_events(self):
@@ -635,7 +649,7 @@ class RuntimeTest(unittest.TestCase):
             self.assertEqual(self.runtime.next_connect, self.now + delay)
             calls = self.credentials.call_count
             for _ in range(50):
-                self.runtime.events.put((COMMAND + "cab", b'{"bindingAuto":"ready"}', False, 1000))
+                self.runtime.events.put((business_topic("cab", "cmd"), b'{"bindingAuto":"ready"}', False, 1000))
                 self.runtime.maintain_connection()
                 self.runtime.engine.receive(*self.runtime.events.get_nowait())
             self.assertEqual(self.credentials.call_count, calls)
@@ -656,7 +670,7 @@ class RuntimeTest(unittest.TestCase):
             self.now += 1
             if self.now >= 1010:
                 self.runtime.stopped.set()
-            return (COMMAND + "cab", b'{"bindingAuto":"ready"}')
+            return (business_topic("cab", "cmd"), b'{"bindingAuto":"ready"}')
         with patch.object(self.runtime.events, "get", side_effect=next_event), patch("bridge.time.time", return_value=1000):
             self.runtime.run()
         self.assertEqual(attempts, [1000, 1003, 1008])
@@ -740,12 +754,12 @@ class RuntimeTest(unittest.TestCase):
         old = self.runtime.client
         old.publish.return_value.is_published.return_value = False
         with self.assertRaises(BridgeError):
-            self.runtime.publish(COMMAND + "cab", {"groupID": "9"})
+            self.runtime.publish(business_topic("cab", "cmd"), {"groupID": "9"})
         self.assertIsNone(self.runtime.client)
         old.loop_stop.assert_called_once()
         self.assertFalse(self.runtime.connected.is_set())
         with self.assertRaises(BridgeError):
-            self.runtime.publish(COMMAND + "cab", {"groupID": "10"})
+            self.runtime.publish(business_topic("cab", "cmd"), {"groupID": "10"})
         self.assertEqual(old.publish.call_count, 1)
         self.runtime.maintain_connection()
         self.runtime.maintain_connection()
@@ -760,8 +774,8 @@ class RuntimeTest(unittest.TestCase):
     def test_publish_exceptions_and_success_keep_nonretained_qos1_contract(self):
         self.runtime.maintain_connection()
         self.subscribe()
-        self.runtime.publish(COMMAND + "cab", {"groupID": "9"})
-        self.runtime.client.publish.assert_called_once_with(COMMAND + "cab", '{"groupID":"9"}', qos=1, retain=False)
+        self.runtime.publish(business_topic("cab", "cmd"), {"groupID": "9"})
+        self.runtime.client.publish.assert_called_once_with(business_topic("cab", "cmd"), '{"groupID":"9"}', qos=1, retain=False)
         for source, error in (("publish", OSError("offline")), ("wait", RuntimeError("no connection")),
                               ("wait", ValueError("queue full"))):
             with self.subTest(source=source, error=type(error).__name__):
@@ -774,7 +788,7 @@ class RuntimeTest(unittest.TestCase):
                 target = client.publish if source == "publish" else client.publish.return_value.wait_for_publish
                 target.side_effect = error
                 with self.assertRaises(BridgeError):
-                    self.runtime.publish(COMMAND + "cab", {"groupID": "9"})
+                    self.runtime.publish(business_topic("cab", "cmd"), {"groupID": "9"})
                 self.assertIsNone(self.runtime.client)
                 self.assertTrue(self.runtime.reconnect_requested.is_set())
 

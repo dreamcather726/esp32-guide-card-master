@@ -7,7 +7,7 @@ from pathlib import Path
 import queue
 import time
 
-from bridge import Backend, BridgeError, COMMAND, ONLINE, Runtime, Store, account_lock, parse_payload
+from bridge import Backend, BridgeError, Runtime, Store, account_lock, business_topic, parse_payload
 
 
 def main():
@@ -34,7 +34,7 @@ def main():
             try:
                 event = runtime.events.get(timeout=0.5)
                 runtime.engine.receive(*event)
-                if event[0] == ONLINE:
+                if event[0] == business_topic(args.cab_guid, "online"):
                     data = parse_payload(event[1])
                     if data.get("cabGuid") == args.cab_guid:
                         print("DEVICE", {k: data.get(k) for k in ("cabGuid", "bootID", "groupID", "userGUID", "bindingState", "bindingVersion")}, flush=True)
@@ -44,7 +44,7 @@ def main():
                             if verified_identity is None:
                                 verified_identity = identity
                                 print("PHYSICAL_DEVICE_READY", flush=True)
-                                runtime.publish(COMMAND + args.cab_guid, {"groupID": args.group_id, "userGUID": args.user_guid})
+                                runtime.publish(business_topic(args.cab_guid, "cmd"), {"groupID": args.group_id, "userGUID": args.user_guid})
                                 print("DUPLICATE_ORIGINAL_COMMAND_PUBLISHED", flush=True)
                             else:
                                 assert identity == verified_identity, "Duplicate assignment rotated binding"
@@ -54,7 +54,7 @@ def main():
             except queue.Empty:
                 pass
             if not sent and args.cab_guid in runtime.engine.online and runtime.subscribed.is_set():
-                runtime.publish(COMMAND + args.cab_guid, {"groupID": args.group_id, "userGUID": args.user_guid})
+                runtime.publish(business_topic(args.cab_guid, "cmd"), {"groupID": args.group_id, "userGUID": args.user_guid})
                 sent = True
                 print("ORIGINAL_TWO_FIELD_COMMAND_PUBLISHED", flush=True)
             if runtime.subscribed.is_set():

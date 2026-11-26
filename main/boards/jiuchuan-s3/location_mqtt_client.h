@@ -70,7 +70,6 @@ private:
     std::string command_topic_;
     std::string event_topic_;
     std::string position_topic_;
-    std::string position_compat_topic_;
     std::string group_topic_;
     std::string group_id_;
     std::string signal_strength_;

@@ -4,7 +4,7 @@ import ssl
 import threading
 import time
 import paho.mqtt.client as mqtt
-from bridge import COMMAND, ONLINE, credentials, parse_payload, mqtt_tls_context, account_lock
+from bridge import BUSINESS_SUBSCRIPTIONS, account_lock, credentials, mqtt_tls_context, parse_business_topic, parse_payload
 
 account_guard = account_lock(os.environ["STATE_DIR"], os.environ["MQTT_SERVICE_ACCOUNT"])
 data, url, refresh = credentials(os.environ["MQTT_CREDENTIALS_URL"], os.environ["MQTT_SERVICE_ACCOUNT"])
@@ -22,24 +22,27 @@ def on_connect(c, userdata, flags, reason, properties):
     print("MQTT_CONNECT", reason, flush=True)
     if not reason.is_failure:
         connected.set()
-        c.subscribe([(ONLINE, 1), (COMMAND + "+", 1)])
+        c.subscribe(list(BUSINESS_SUBSCRIPTIONS))
 
 
 def on_subscribe(c, userdata, mid, reasons, properties):
     print("BUSINESS_SUBACK", [str(reason) for reason in reasons], flush=True)
-    if len(reasons) == 2 and not any(r.is_failure for r in reasons):
+    if len(reasons) == len(BUSINESS_SUBSCRIPTIONS) and not any(r.is_failure for r in reasons):
         subscribed.set()
 
 
 def on_message(c, userdata, message):
     if message.retain:
         return
-    if message.topic == ONLINE:
+    route = parse_business_topic(message.topic)
+    if route is None:
+        return
+    cab, kind = route
+    if kind == "online":
         counts["online"] += 1
         try:
             value = parse_payload(message.payload)
-            cab = value.get("cabGuid")
-            if cab:
+            if value.get("cabGuid") == cab:
                 devices[cab] = {key: value.get(key) for key in ("cabGuid", "macAddress", "bootID", "fwVersion", "bindingState")}
         except ValueError:
             pass

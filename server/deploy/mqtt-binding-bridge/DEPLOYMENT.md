@@ -4,7 +4,7 @@
 
 ## 客户继续怎么用
 
-发送到 `cabinet/cmd/864479086586824s3`，保持 `retain=false`：
+升级到新业务主题后，发送到 `topic/864479086586824s3/cmd`，保持 `retain=false`。
 
 ```json
 {"groupID":"9","userGUID":"DTkxHempvRmp"}

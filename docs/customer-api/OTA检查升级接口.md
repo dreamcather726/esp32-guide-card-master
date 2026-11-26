@@ -38,7 +38,7 @@ Device-Id 是设备标识，不是密码；此说明描述现有设备协议，�
 
 注意：角色/对话接口的 deviceId 可支持 IMEI/cabGuid 映射，**OTA 检查的 Device-Id 则要填 MAC**。
 不要把 IMEI、cabGuid、userGUID、agentId、keyId 或智控台设备记录 ID 填到这里。
-可从 `device/broadcast/online` 中的 `macAddress` 或开机日志获取 MAC。
+可从 `topic/{imei}/online` 中的 `macAddress` 或开机日志获取 MAC。
 HTTP Client-Id 也不是要求复用 MQTT clientId。
 
 ## 3. 最小请求体

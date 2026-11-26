@@ -642,7 +642,7 @@ export default {
     setCommand(command) {
       commands.set(this, command);
       this.commandRevealed = false;
-      this.commandTopic = `cabinet/cmd/${this.context.cabGuid}`;
+      this.commandTopic = `topic/${this.context.cabGuid}/cmd`;
       this.commandState = 'commandPending';
       this.hasCommand = true;
     },

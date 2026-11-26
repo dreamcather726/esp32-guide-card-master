@@ -1,7 +1,7 @@
 export const en = {
     title: 'Device User Binding', bindUser: 'User binding', back: 'Devices',
     context: 'Current Boot', macAddress: 'Device MAC', cabGuid: 'cabGuid', bootID: 'bootID', userGUID: 'userGUID',
-    importReport: 'Import online report', reportTitle: 'MQTT Online Report', reportSource: 'device/broadcast/online',
+    importReport: 'Import online report', reportTitle: 'MQTT Online Report', reportSource: 'topic/{imei}/online',
     import: 'Import', cancel: 'Cancel', required: 'Required', invalidId: 'Use 1-128 characters without edge spaces or control characters.',
     invalidMac: 'Enter a colon-separated device MAC address.', invalidReport: 'Expected a KJ online report with cabGuid, bootID, userGUID, bindingState, bindingVersion and usageSessionID.',
     reportImported: 'Report imported', reportTime: 'Report imported at', reportState: 'Reported state', noReport: 'No online report received or imported',
@@ -56,7 +56,7 @@ export const en = {
 export const zhCN = {
     title: '设备用户绑定', bindUser: '用户绑定', back: '设备列表',
     context: '当前开机', macAddress: '设备 MAC', cabGuid: 'cabGuid', bootID: 'bootID', userGUID: 'userGUID',
-    importReport: '导入上线报文', reportTitle: 'MQTT 上线报文', reportSource: 'device/broadcast/online',
+    importReport: '导入上线报文', reportTitle: 'MQTT 上线报文', reportSource: 'topic/{imei}/online',
     import: '导入', cancel: '取消', required: '必填', invalidId: '请输入 1-128 个字符，首尾无空格且无控制字符。',
     invalidMac: '请输入以冒号分隔的设备 MAC 地址。', invalidReport: '需要包含 cabGuid、bootID、userGUID、bindingState、bindingVersion 和 usageSessionID 的 KJ 上线报文。',
     reportImported: '上线报文已导入', reportTime: '报文导入时间', reportState: '报文状态', noReport: '尚未收到或导入上线报文',

@@ -33,7 +33,7 @@
 
 2.1.46 的诊断页区分订阅拒绝 `POS MQTT SUB DENIED`、订阅后 60 秒未收到实时数据 `POS NO DATA #XXXXXX`、旧保留消息 `POS RETAINED WAIT` 和无效报文 `POS RX BAD PAYLOAD` / `POS RX BAD PACKET`。`XXXXXX` 是订阅主题所用 IMEI 的后六位，完整主题见串口 `[SUBSCRIBE]`。针对样例中连续出现的 `"Wifisan":,"Wifisan":[]`，解析会跳过第一个缺少值的字段，其余字段继续按原规则校验。
 
-旧业务客户端对 `cabinet/position/...` 的订阅为兼容保留，但不再用业务控制或旧定位报文覆盖直接 ML307C 定位状态。
+业务 WSS 客户端订阅 `topic/{imei}/position`，其中 `{imei}` 为模组 IMEI 拼接 `s3`。屏幕定位状态由上面的独立 ML307C 定位客户端更新。
 
 ## 四角状态
 

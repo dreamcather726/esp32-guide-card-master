@@ -131,6 +131,7 @@ test('ready requires exact user/boot/version/session match from a real report', 
 test('copy-once command is redacted by default, outside serializable state and cleared after copy', async () => {
   const vm = page();
   vm.setCommand(utils.bindCommand(binding(), vm.context));
+  assert.equal(vm.commandTopic, 'topic/test-cabinet/cmd');
   assert.equal(vm.commandPreview().includes(token), false);
   assert.equal(JSON.stringify(vm).includes(token), false);
   vm.commandRevealed = true;

@@ -1,13 +1,13 @@
 # Customer MQTT User Binding Bridge
 
 The customer continues publishing this non-retained message to
-`cabinet/cmd/{cabGuid}`:
+`topic/{imei}/cmd`. The topic’s `{imei}` is the modem IMEI followed by `s3`, equal to `cabGuid`.
 
 ```json
 {"groupID":"9","userGUID":"DTkxHempvRmp"}
 ```
 
-The bridge observes fresh `device/broadcast/online` telemetry, checks an
+The bridge observes fresh `topic/{imei}/online` telemetry, checks an
 owner-approved MAC/cabGuid pairing via the management API, requests a server-issued
 binding for that exact boot, and publishes the complete `bindUser` command on the
 same command topic. The device verifies that command with the voice server.
@@ -34,8 +34,8 @@ error and the customer should resend it after the device is online.
   JSON `{"imei":"AB12cd34"}`.
 - Temporary MQTT username/password are held only in memory. The bridge refreshes
   a 3600-second credential after 2880 seconds, then reconnects/resubscribes.
-- Subscriptions: `device/broadcast/online` and `cabinet/cmd/+`.
-- Publish permission: `cabinet/cmd/+`; QoS 1, retain false.
+- Subscribe to `topic/+/online` and `topic/+/cmd`.
+- Allow publishing to `topic/+/cmd` with QoS 1 and retain false.
 - Default `iot/+/msg` in the credential response does not prove business-topic ACL
   access. `probe.py` checks SUBACK and observes traffic without publishing commands.
 - WSS uses normal certificate/hostname verification. The supplied credential API

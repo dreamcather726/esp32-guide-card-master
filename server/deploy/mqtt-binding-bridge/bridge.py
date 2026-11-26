@@ -16,8 +16,6 @@ import urllib.request
 import uuid
 
 LOG = logging.getLogger("mqtt-binding")
-ONLINE = "device/broadcast/online"
-COMMAND = "cabinet/cmd/"
 FRESH_SECONDS = 180
 MAX_PAYLOAD = 32768
 
@@ -51,6 +49,23 @@ def identifier(value, limit=128):
 
 def cab_id(value):
     return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is not None
+
+
+def business_topic(cab, kind):
+    return f"topic/{cab}/{kind}"
+
+
+BUSINESS_SUBSCRIPTIONS = ((business_topic("+", "online"), 1), (business_topic("+", "cmd"), 1))
+
+
+def parse_business_topic(topic):
+    parts = topic.split("/")
+    if len(parts) != 3:
+        return None
+    namespace, cab, kind = parts
+    if namespace != "topic" or cab == "group" or not cab_id(cab) or kind not in ("online", "cmd"):
+        return None
+    return cab, kind
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -225,7 +240,7 @@ class Engine:
         self.previous_boots = {}
 
     def reply(self, cab, state, message, request_id=""):
-        self.publish(COMMAND + cab, {"bindingAuto": state, "cmdID": request_id, "msg": message})
+        self.publish(business_topic(cab, "cmd"), {"bindingAuto": state, "cmdID": request_id, "msg": message})
         LOG.info("binding cab=%s state=%s", cab, state)
 
     def receive(self, topic, payload, retained=False, received=None):
@@ -235,15 +250,19 @@ class Engine:
         received = now if received is None else received
         if now - received > FRESH_SECONDS or received > now + 5:
             return
+        route = parse_business_topic(topic)
+        if route is None:
+            return
+        cab, kind = route
         value = parse_payload(payload)
-        if topic == ONLINE:
-            self._online(value, received)
-        elif topic.startswith(COMMAND) and cab_id(topic[len(COMMAND):]):
-            self._assignment(topic[len(COMMAND):], value, now)
+        if kind == "online":
+            self._online(cab, value, received)
+        else:
+            self._assignment(cab, value, now)
 
-    def _online(self, value, received):
-        cab, boot = value.get("cabGuid"), value.get("bootID")
-        if value.get("cmd") != "KJ" or not cab_id(cab) or not identifier(boot):
+    def _online(self, cab, value, received):
+        boot = value.get("bootID")
+        if value.get("cmd") != "KJ" or value.get("cabGuid") != cab or not identifier(boot):
             return
         previous = self.online.get(cab)
         if boot in self.previous_boots.get(cab, set()):
@@ -354,7 +373,7 @@ class Engine:
                         self.finish(intent, "error", "binding changed; resend assignment")
                         continue
                     if intent["group_pending"]:
-                        self.publish(COMMAND + cab, {"groupID": intent["group_id"]})
+                        self.publish(business_topic(cab, "cmd"), {"groupID": intent["group_id"]})
                     message = "device verified current user" if intent["version"] else "device already reports this user ready"
                     self.finish(intent, "ready", message)
                     continue
@@ -370,9 +389,9 @@ class Engine:
                 self.store.dispatched(cab, cmd["bindingVersion"], cmd["usageSessionID"])
                 if intent["group_pending"]:
                     # 2.1.7 rejects mixed group/user commands before saving the group.
-                    self.publish(COMMAND + cab, {"groupID": intent["group_id"]})
+                    self.publish(business_topic(cab, "cmd"), {"groupID": intent["group_id"]})
                     self.store.group_delivered(intent)
-                self.publish(COMMAND + cab, cmd)
+                self.publish(business_topic(cab, "cmd"), cmd)
                 if not intent["version"]:
                     self.reply(cab, "dispatched", "command sent; awaiting device verification", intent["request_id"])
                 self.store.retry(cab, now, 10)
@@ -456,14 +475,14 @@ class Runtime:
                 self.reconnect_requested.set()
                 return
             self.connected.set()
-            rc, _ = c.subscribe([(ONLINE, 1), (COMMAND + "+", 1)])
+            rc, _ = c.subscribe(list(BUSINESS_SUBSCRIPTIONS))
             if rc != mqtt.MQTT_ERR_SUCCESS:
                 self.reconnect_requested.set()
 
         def on_subscribe(c, userdata, mid, reasons, properties):
             if c is not self.client:
                 return
-            if len(reasons) != 2 or any(reason.is_failure for reason in reasons):
+            if len(reasons) != len(BUSINESS_SUBSCRIPTIONS) or any(reason.is_failure for reason in reasons):
                 LOG.error("MQTT business-topic subscription rejected; check account ACL")
                 self.subscribed.clear()
                 self.reconnect_requested.set()
