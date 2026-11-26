@@ -65,7 +65,7 @@ python3 tests/run_navigation_lvgl_test.py --lvgl /path/to/lvgl-9.3.0 --cjson /pa
 
 ## 两路 MQTT 启动诊断
 
-现有 `CabinetMqtt`（凭证服务返回的 WSS 域名）和 `PositionMqtt`（`mqtt://iot.suji.work:1883`）均打印连接、登录、成功、订阅确认、断线及错误日志，每条关键日志携带 broker，方便按实际域名区分。连接参数包含 clientId、用户名、主题、keepalive、栈与缓冲区大小；密码隐藏，WSS URL 仅打印 scheme/host/port，不打印 URL 中的凭据、路径或查询令牌。
+2.1.48 的 `CabinetMqtt` 和 `PositionMqtt` 默认连接 `mqtt://iot.suji.work:1883`。业务客户端使用 `<IMEI>s3` 作为 clientId，定位客户端使用 `s3-position-<IMEI>`。串口日志区分登录、连接成功、订阅成功、订阅拒绝和断线。
 
 `[TASK_STARTED]` 仅代表任务启动，`[CONNECTED] ... CONNACK=0` 才代表服务器登录成功。`[ERROR]` 打印 error type、CONNACK、TLS 和 socket errno，可区分认证拒绝和连接错误。
 

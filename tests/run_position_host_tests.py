@@ -20,9 +20,17 @@ def main():
         cabinet = (ROOT / "main/boards/jiuchuan-s3/location_mqtt_client.cc").read_text(encoding="utf-8")
         manager_header = (ROOT / "main/boards/jiuchuan-s3/location_mqtt_client.h").read_text(encoding="utf-8")
         (temp / "manager.inc").write_text(manager_header[manager_header.index("class LocationMqttClient {"):manager_header.index("#endif")] + "\n" +
-            cabinet[cabinet.index("void LocationMqttClient::Start()"):cabinet.index("bool LocationMqttClient::FetchCredentials(")], encoding="utf-8")
+            cabinet[cabinet.index("void LocationMqttClient::Start()"):cabinet.index("void LocationMqttClient::CloseBlueScanSocket(")], encoding="utf-8")
         (temp / "broker_log.inc").write_text(cabinet[cabinet.index("std::string BrokerAddressForLog("):
-                                                    cabinet.index("constexpr const char* kCredentialsUrl")], encoding="utf-8")
+                                                    cabinet.index("constexpr const char* kBusinessBrokerUri")], encoding="utf-8")
+        broker_config = (ROOT / "main/boards/jiuchuan-s3/position_mqtt_config.h").read_text(encoding="utf-8")
+        (temp / "business_uri.inc").write_text(
+            next(line for line in broker_config.splitlines() if line.startswith("#define JIUCHUAN_BUSINESS_MQTT_URI ")) + "\n" +
+            next(line for line in cabinet.splitlines() if line.startswith("constexpr const char* kGroupTopicPrefix ")) + "\n",
+            encoding="utf-8")
+        (temp / "business_client.inc").write_text(
+            cabinet[cabinet.index("bool LocationMqttClient::StartMqtt("):
+                    cabinet.index("void LocationMqttClient::MqttEventEntry(")], encoding="utf-8")
         (temp / "subscriber.inc").write_text(header[header.index("class PositionSubscriber {"):] + "\n" + source[source.index("namespace {"):], encoding="utf-8")
         (temp / "online_report.inc").write_text("\n".join([
             cabinet[cabinet.index("struct BleBeaconSample {"):cabinet.index("\nstd::string", cabinet.index("int AddBleBeaconReport("))],

@@ -35,6 +35,8 @@
 
 ## 业务 MQTT
 
+从 2.1.48 起，业务客户端 `CabinetMqtt` 直接连接 `mqtt://iot.suji.work:1883`。在本地 `position_mqtt_local.h` 配置 Broker 凭证。业务连接默认取定位账号，可用 `JIUCHUAN_BUSINESS_MQTT_USERNAME` 与 `JIUCHUAN_BUSINESS_MQTT_PASSWORD` 配置独立业务账号。账号需要具备下方主题对应的发布或订阅权限。
+
 业务主题中的 `{imei}` 为模组 IMEI 直接拼接 `s3`，与报文中的 `cabGuid` 相同。
 
 | 用途 | 主题 |

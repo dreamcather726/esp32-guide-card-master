@@ -33,16 +33,6 @@ public:
     static bool RecordBleBeacon(const char (&mac)[18], int rssi);
 
 private:
-    struct Credentials {
-        std::string client_id;
-        std::string username;
-        std::string password;
-        std::string pub_topic;
-        std::string subscribe_topic;
-        std::string wss_url;
-        int expires_in = 0;
-    };
-
     RndisBoard& board_;
     TaskHandle_t task_handle_ = nullptr;
     std::atomic<bool> running_{false};
@@ -51,11 +41,9 @@ private:
     std::atomic<bool> connect_error_reported_{false};
     std::atomic<bool> report_requested_{false};
     std::atomic<bool> shutdown_scheduled_{false};
-    int last_credentials_http_status_ = 0;
     std::mutex mqtt_mutex_;
     std::mutex state_mutex_;
     esp_mqtt_client_handle_t mqtt_client_ = nullptr;
-    Credentials active_credentials_;
     std::unique_ptr<SdContentManager> content_manager_;
     std::unique_ptr<PositionSubscriber> position_subscriber_;
     int blue_scan_socket_ = -1;
@@ -94,11 +82,7 @@ private:
     bool WaitOrStop(uint32_t delay_ms, bool interrupt_on_network_loss = false);
     void PollBlueScan();
     void CloseBlueScanSocket();
-    bool FetchCredentials(const std::string& cab_guid,
-                          Credentials& credentials);
-    bool StartMqtt(const Credentials& credentials,
-                   const std::string& physical_imei,
-                   const std::string& cab_guid);
+    bool StartMqtt(const std::string& physical_imei);
     void StopMqtt();
     void HandleMqttEvent(int32_t event_id, esp_mqtt_event_handle_t event);
     void HandleMqttPayload(const std::string& topic,

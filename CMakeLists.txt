@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 set(IDF_TARGET esp32s3)
-set(PROJECT_VER "2.1.47")
+set(PROJECT_VER "2.1.48")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 idf_build_set_property(MINIMAL_BUILD ON)

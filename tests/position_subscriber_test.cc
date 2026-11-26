@@ -43,7 +43,10 @@ struct EventData {
 };
 using esp_mqtt_event_handle_t = EventData*;
 struct esp_mqtt_client_config_t {
-    struct { struct { const char* uri = nullptr; } address; } broker;
+    struct {
+        struct { const char* uri = nullptr; } address;
+        struct { int (*crt_bundle_attach)(void*) = nullptr; } verification;
+    } broker;
     struct { const char* client_id = nullptr; const char* username = nullptr;
              struct { const char* password = nullptr; } authentication; } credentials;
     struct { int keepalive = 0; } session;
@@ -60,8 +63,18 @@ static int internal_budget = -1, internal_used = 0, internal_peak = 0;
 static bool mqtt_stack_allocated = false;
 static void (*event_callback)(void*, const char*, int32_t, void*) = nullptr;
 static void* event_argument = nullptr;
-static Client client;
+static Client client, business_client;
+static int business_starts = 0, business_stops = 0, business_destroys = 0;
+static int business_start_result = ESP_OK;
+static int esp_crt_bundle_attach(void*) { return ESP_OK; }
 static Client* esp_mqtt_client_init(const esp_mqtt_client_config_t* config) {
+    if (std::string(config->broker.address.uri) == "mqtt://iot.suji.work:1883") {
+        assert(std::string(config->credentials.client_id) == "864479086534998s3");
+        assert(std::string(config->credentials.username) == "business-test");
+        assert(std::string(config->credentials.authentication.password) == "fake-business-password");
+        assert(config->task.stack_size == 6144 && config->network.reconnect_timeout_ms == 5000);
+        return &business_client;
+    }
     assert(std::string(config->broker.address.uri) == "mqtt://example.test:1883");
     assert(std::string(config->credentials.username) == "unit-test");
     assert(std::string(config->credentials.authentication.password) == "fake-password");
@@ -69,10 +82,15 @@ static Client* esp_mqtt_client_init(const esp_mqtt_client_config_t* config) {
     client_id = config->credentials.client_id;
     return init_success ? &client : nullptr;
 }
-static int esp_mqtt_client_register_event(Client*, int, decltype(event_callback) callback, void* argument) {
+static int esp_mqtt_client_register_event(Client* connection, int, decltype(event_callback) callback, void* argument) {
+    if (connection == &business_client) return ESP_OK;
     event_callback = callback; event_argument = argument; return register_result;
 }
-static int esp_mqtt_client_start(Client*) {
+static int esp_mqtt_client_start(Client* connection) {
+    if (connection == &business_client) {
+        ++business_starts;
+        return business_start_result;
+    }
     ++starts;
     if (start_result != ESP_OK) return start_result;
     if (internal_budget >= 0) {
@@ -82,8 +100,16 @@ static int esp_mqtt_client_start(Client*) {
     }
     return ESP_OK;
 }
-static int esp_mqtt_client_stop(Client*) { ++stops; return ESP_OK; }
-static int esp_mqtt_client_destroy(Client*) {
+static int esp_mqtt_client_stop(Client* connection) {
+    if (connection == &business_client) ++business_stops;
+    else ++stops;
+    return ESP_OK;
+}
+static int esp_mqtt_client_destroy(Client* connection) {
+    if (connection == &business_client) {
+        ++business_destroys;
+        return ESP_OK;
+    }
     ++destroys;
     if (mqtt_stack_allocated) { internal_used -= 4096; mqtt_stack_allocated = false; }
     return ESP_OK;
@@ -186,14 +212,17 @@ struct RndisBoard {
 #define JIUCHUAN_POSITION_MQTT_URI "mqtt://example.test:1883"
 #define JIUCHUAN_POSITION_MQTT_USERNAME "unit-test"
 #define JIUCHUAN_POSITION_MQTT_PASSWORD "fake-password"
+#define JIUCHUAN_BUSINESS_MQTT_USERNAME "business-test"
+#define JIUCHUAN_BUSINESS_MQTT_PASSWORD "fake-business-password"
+#include "business_uri.inc"
 #define private public
 #include "subscriber.inc"
 #undef private
 #include "broker_log.inc"
 
-constexpr uint32_t kRetryDelayMs = 2000, kUnauthorizedRetryDelayMs = 30000,
-    kConnectWaitMs = 30000, kReconnectGraceMs = 60000, kOnlineReportIntervalSeconds = 60;
-constexpr int kCredentialRefreshMarginSeconds = 300;
+constexpr const char* kBusinessBrokerUri = JIUCHUAN_BUSINESS_MQTT_URI;
+constexpr uint32_t kRetryDelayMs = 2000, kConnectWaitMs = 30000,
+    kReconnectGraceMs = 60000, kOnlineReportIntervalSeconds = 60;
 class SdContentManager {};
 struct Application {
     static Application& GetInstance() { static Application instance; return instance; }
@@ -222,18 +251,11 @@ static int esp_mqtt_client_publish(Client*, const char* address, const char* pay
 }
 #include "online_report.inc"
 
-static int credential_requests = 0;
 LocationMqttClient::LocationMqttClient(RndisBoard& board, std::function<bool()> ready)
     : board_(board), position_subscriber_(std::make_unique<PositionSubscriber>(board, std::move(ready))) {}
 LocationMqttClient::~LocationMqttClient() { Stop(); }
-bool LocationMqttClient::FetchCredentials(const std::string&, Credentials&) {
-    ++credential_requests;
-    last_credentials_http_status_ = 403;
-    SetScreenDiagnostic("BIZ MQTT HTTP 403");
-    return false;
-}
-bool LocationMqttClient::StartMqtt(const Credentials&, const std::string&, const std::string&) { assert(false); return false; }
-void LocationMqttClient::StopMqtt() {}
+void LocationMqttClient::MqttEventEntry(void*, esp_event_base_t, int32_t, void*) {}
+#include "business_client.inc"
 void LocationMqttClient::QuerySignalStrength() {}
 void LocationMqttClient::PersistRuntimeCheckpoint() {}
 
@@ -253,6 +275,22 @@ static void Payload(const std::string& body, bool retained = false) {
 }
 
 int main() {
+    {
+        RndisBoard board;
+        LocationMqttClient manager(board, [] { return true; });
+        manager.group_id_ = "9";
+        assert(manager.StartMqtt(board.imei));
+        assert(manager.mqtt_client_ == &business_client);
+        assert(manager.command_topic_ == "topic/864479086534998s3/cmd");
+        assert(manager.event_topic_ == "topic/864479086534998s3/event");
+        assert(manager.position_topic_ == "topic/864479086534998s3/position");
+        assert(manager.group_topic_ == "topic/group/9");
+        assert(logs.find("fake-business-password") == std::string::npos);
+        const int stopped = business_stops, destroyed = business_destroys;
+        manager.StopMqtt();
+        assert(!manager.mqtt_client_ && business_stops == stopped + 1 && business_destroys == destroyed + 1);
+    }
+    std::cout << "PASS direct iot.suji.work business configuration, topic paths and teardown\n";
     {
         RndisBoard board;
         LocationMqttClient manager(board, [] { return true; });
@@ -518,7 +556,8 @@ int main() {
         assert(esp_mqtt_client_start(&client) != ESP_OK);
         internal_used = 0;
         const int original_tasks = management_tasks;
-        const int original_requests = credential_requests;
+        const int original_starts = business_starts;
+        business_start_result = -1;
         const int64_t begin = now_us;
         {
             LocationMqttClient manager(board, []() { return true; });
@@ -531,19 +570,20 @@ int main() {
             manager.Start(); manager.Start(); // Idempotent: only one existing management task.
             manager_task(); on_delay = {}; manager_task = {};
             assert(management_tasks == original_tasks + 1);
-            assert(credential_requests - original_requests == 3); // 403 retry backoff 30s, 60s, 120s.
-            assert(board.display.business_diagnostic == "BIZ MQTT HTTP 403");
+            assert(business_starts > original_starts);
+            assert(board.display.business_diagnostic == "BIZ MQTT START ERROR");
             assert(manager.position_subscriber_->client_ != nullptr);
             assert(internal_peak == 12288 + 4096 && internal_peak < internal_budget);
         }
         assert(internal_used == 0); // MQTT and shared worker stacks both released.
         internal_budget = -1;
     }
-    std::cout << "PASS real shared manager Start/Run/WaitOrStop: one management task, 6KB stack saving, bounded stack-budget recovery, 403-independent positioning and cleanup\n";
+    std::cout << "PASS real shared manager Start/Run/WaitOrStop: one management task, 6KB stack saving, bounded stack-budget recovery, positioning during broker retries and cleanup\n";
     {
         RndisBoard board;
         LocationMqttClient manager(board, []() { return true; });
-        const int original_requests = credential_requests;
+        const int original_starts = business_starts;
+        business_start_result = -1;
         int ticks = 0;
         on_delay = [&]() {
             ++ticks;
@@ -553,7 +593,8 @@ int main() {
         };
         manager.Run();
         on_delay = {};
-        assert(credential_requests == original_requests + 2);
+        assert(business_starts == original_starts + 2);
+        business_start_result = ESP_OK;
     }
-    std::cout << "PASS business MQTT retries immediately after a 4G outage during credential backoff\n";
+    std::cout << "PASS business MQTT retries immediately after a 4G outage during broker retry\n";
 }

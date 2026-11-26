@@ -11,6 +11,7 @@
 #include "system_info.h"
 #include "user_binding_json.h"
 #include "position_subscriber.h"
+#include "position_mqtt_config.h"
 
 #include <cJSON.h>
 #include <esp_app_desc.h>
@@ -19,7 +20,6 @@
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
 #include <esp_vfs_fat.h>
-#include <http.h>
 #include <lwip/sockets.h>
 #include <unistd.h>
 
@@ -49,19 +49,14 @@ std::string BrokerAddressForLog(const std::string& uri) {
     for (char& ch : authority) if (static_cast<unsigned char>(ch) < 0x20) ch = '?';
     return (scheme == std::string::npos ? "" : uri.substr(0, start)) + authority;
 }
-constexpr const char* kCredentialsUrl =
-    "http://mqttak.suji.work:8443/api/credentials";
+constexpr const char* kBusinessBrokerUri = JIUCHUAN_BUSINESS_MQTT_URI;
 constexpr const char* kSettingsNamespace = "cab_mqtt";
 constexpr const char* kGroupTopicPrefix = "topic/group/";
 // One worker services both clients after the existing startup gate.
 constexpr uint32_t kRetryDelayMs = 2000;
-constexpr uint32_t kUnauthorizedRetryDelayMs = 30000;
 constexpr uint32_t kConnectWaitMs = 30000;
-constexpr uint32_t kCredentialsHttpTimeoutMs = 10000;
 constexpr uint32_t kReconnectGraceMs = 60000;
 constexpr uint32_t kOnlineReportIntervalSeconds = 60;
-constexpr int kDefaultCredentialSeconds = 3600;
-constexpr int kCredentialRefreshMarginSeconds = 300;
 
 struct BleBeaconSample {
     char mac[18]{};
@@ -463,7 +458,7 @@ void LocationMqttClient::Stop() {
     if (task != nullptr) {
         xTaskNotifyGive(task);
     }
-    // HTTP/AT work can take more than one second. Join before releasing the
+    // Network and AT work can outlast one polling cycle. Join before releasing the
     // positioning client that this worker now services.
     while (running_) vTaskDelay(pdMS_TO_TICKS(10));
     task_handle_ = nullptr;
@@ -491,7 +486,7 @@ bool LocationMqttClient::WaitOrStop(uint32_t delay_ms, bool interrupt_on_network
     const int64_t deadline = esp_timer_get_time() + int64_t(delay_ms) * 1000;
     while (!stop_requested_) {
         // Keep the independent position connection/CSQ alive even during
-        // long credential retries, without a second 6144-byte worker stack.
+        // business MQTT retries, without a second 6144-byte worker stack.
         position_subscriber_->Poll();
         PollBlueScan();
         if (interrupt_on_network_loss && !IsNetworkAvailable()) break;
@@ -503,12 +498,20 @@ bool LocationMqttClient::WaitOrStop(uint32_t delay_ms, bool interrupt_on_network
 }
 
 void LocationMqttClient::Run() {
-    uint32_t credential_failures = 0;
+    if (!*JIUCHUAN_BUSINESS_MQTT_USERNAME || !*JIUCHUAN_BUSINESS_MQTT_PASSWORD) {
+        SetScreenDiagnostic("BIZ MQTT NO CONFIG");
+        ESP_LOGW(kTag, "Missing business MQTT credentials for %s",
+                 BrokerAddressForLog(kBusinessBrokerUri).c_str());
+        while (!WaitOrStop(1000)) {
+            // Keep positioning and BlueScan available without business credentials.
+        }
+        return;
+    }
+
     while (!stop_requested_) {
         position_subscriber_->Poll();
         PollBlueScan();
         if (!IsNetworkAvailable()) {
-            credential_failures = 0;
             SetScreenDiagnostic("BIZ MQTT WAIT NET", false);
             if (WaitOrStop(1000)) break;
             continue;
@@ -517,34 +520,13 @@ void LocationMqttClient::Run() {
         const std::string physical_imei = board_.GetImei();
         if (physical_imei.empty()) {
             SetScreenDiagnostic("BIZ MQTT WAIT IMEI", false);
-            ESP_LOGW(kTag, "physical IMEI is not ready; credentials request postponed");
+            ESP_LOGW(kTag, "physical IMEI is not ready; business MQTT connection postponed");
             if (WaitOrStop(kRetryDelayMs)) {
                 break;
             }
             continue;
         }
-        const std::string cab_guid = physical_imei + "s3";
-
-        Credentials credentials;
-        if (!FetchCredentials(cab_guid, credentials)) {
-            credential_failures = std::min<uint32_t>(credential_failures + 1, 8);
-            const uint32_t retry_delay =
-                (last_credentials_http_status_ == 401 ||
-                 last_credentials_http_status_ == 403 ||
-                 last_credentials_http_status_ == 429)
-                    ? std::min<uint32_t>(kUnauthorizedRetryDelayMs << std::min<uint32_t>(credential_failures - 1, 4), 300000)
-                    : std::min<uint32_t>(kRetryDelayMs << (credential_failures - 1), 60000);
-            ESP_LOGW(kTag,
-                     "credentials unavailable (HTTP %d); retrying in %u ms",
-                     last_credentials_http_status_, retry_delay);
-            if (WaitOrStop(retry_delay, true)) {
-                break;
-            }
-            continue;
-        }
-        credential_failures = 0;
-
-        if (!StartMqtt(credentials, physical_imei, cab_guid)) {
+        if (!StartMqtt(physical_imei)) {
             if (WaitOrStop(kRetryDelayMs)) {
                 break;
             }
@@ -567,21 +549,13 @@ void LocationMqttClient::Run() {
         }
         if (!connected_) {
             if (!connect_error_reported_) SetScreenDiagnostic("BIZ MQTT LOGIN TIMEOUT");
-            ESP_LOGE(kTag, "MQTT WSS did not connect within %u ms", kConnectWaitMs);
+            ESP_LOGE(kTag, "Business MQTT did not connect within %u ms", kConnectWaitMs);
             StopMqtt();
             if (WaitOrStop(kRetryDelayMs)) {
                 break;
             }
             continue;
         }
-
-        int refresh_seconds = credentials.expires_in -
-                              kCredentialRefreshMarginSeconds;
-        if (refresh_seconds < 60) {
-            refresh_seconds = std::max(60, credentials.expires_in / 2);
-        }
-        ESP_LOGI(kTag, "temporary MQTT credentials refresh in %d seconds",
-                  refresh_seconds);
 
         QuerySignalStrength();
         if (PublishOnlineReport()) {
@@ -594,9 +568,7 @@ void LocationMqttClient::Run() {
 
         uint32_t disconnected_ms = 0;
         uint32_t report_elapsed_seconds = 0;
-        for (int elapsed = 0;
-             !stop_requested_ && elapsed < refresh_seconds;
-             ++elapsed) {
+        while (!stop_requested_) {
             if (WaitOrStop(1000)) {
                 break;
             }
@@ -605,7 +577,7 @@ void LocationMqttClient::Run() {
                 disconnected_ms += 1000;
                 if (disconnected_ms >= kReconnectGraceMs) {
                     ESP_LOGW(kTag,
-                             "MQTT remained offline for %u ms; renewing credentials",
+                             "MQTT remained offline for %u ms; restarting the client",
                              disconnected_ms);
                     break;
                 }
@@ -628,134 +600,6 @@ void LocationMqttClient::Run() {
             break;
         }
     }
-}
-
-bool LocationMqttClient::FetchCredentials(const std::string& cab_guid,
-                                          Credentials& credentials) {
-    last_credentials_http_status_ = 0;
-    auto* network = board_.GetNetwork();
-    if (!network) {
-        SetScreenDiagnostic("BIZ CRED NO NETWORK");
-        ESP_LOGE(kTag, "network interface is unavailable");
-        return false;
-    }
-
-    auto http = network->CreateHttp(2);
-    if (!http) {
-        SetScreenDiagnostic("BIZ CRED NO CLIENT");
-        ESP_LOGE(kTag, "failed to create credentials HTTP client");
-        return false;
-    }
-    http->SetTimeout(kCredentialsHttpTimeoutMs);
-    http->SetKeepAlive(false);
-    http->SetHeader("Content-Type", "application/json");
-    http->SetHeader("Accept", "application/json");
-    http->SetContent(std::string("{\"imei\":\"") + cab_guid + "\"}");
-
-    ESP_LOGI(kTag, "POST temporary credentials for cabGuid %s",
-             cab_guid.c_str());
-    if (!http->Open("POST", kCredentialsUrl)) {
-        const auto error = static_cast<unsigned>(http->GetLastError());
-        char diagnostic[40];
-        std::snprintf(diagnostic, sizeof(diagnostic), "BIZ CRED OPEN %X", error);
-        SetScreenDiagnostic(diagnostic);
-        ESP_LOGE(kTag, "credentials HTTP open failed, error=0x%x", error);
-        return false;
-    }
-
-    const int status = http->GetStatusCode();
-    last_credentials_http_status_ = status;
-    if (status <= 0) {
-        http->Close();
-        SetScreenDiagnostic("BIZ CRED NO HTTP");
-        return false;
-    }
-    std::string body;
-    char response_chunk[256];
-    int count = 0;
-    while (body.size() < 8192) {
-        count = http->Read(response_chunk, std::min(sizeof(response_chunk), 8192 - body.size()));
-        if (count <= 0) break;
-        body.append(response_chunk, count);
-    }
-    http->Close();
-    if (status != 200) {
-        char diagnostic[40];
-        std::snprintf(diagnostic, sizeof(diagnostic), "BIZ MQTT HTTP %d", status);
-        SetScreenDiagnostic(diagnostic);
-        std::string reason;
-        cJSON* error_root = cJSON_ParseWithLength(body.data(), body.size());
-        if (error_root) {
-            reason = JsonScalar(error_root, "Error");
-            if (reason.empty()) {
-                reason = JsonScalar(error_root, "error");
-            }
-            if (reason.empty()) reason = JsonScalar(error_root, "message");
-            cJSON_Delete(error_root);
-        }
-        if (reason.size() > 160) {
-            reason.resize(160);
-        }
-        if (!reason.empty()) {
-            for (char& ch : reason) if (static_cast<unsigned char>(ch) < 0x20) ch = ' ';
-            if (reason.find("password") != std::string::npos || reason.find("token") != std::string::npos ||
-                reason.find("secret") != std::string::npos) reason = "sensitive server detail omitted";
-            ESP_LOGE(kTag, "credentials API returned HTTP %d: %s",
-                     status, reason.c_str());
-        } else {
-            ESP_LOGE(kTag, "credentials API returned HTTP %d", status);
-        }
-        return false;
-    }
-    if (count < 0) {
-        SetScreenDiagnostic("BIZ CRED READ ERROR");
-        return false;
-    }
-
-    cJSON* root = cJSON_ParseWithLength(body.data(), body.size());
-    if (!root) {
-        SetScreenDiagnostic("BIZ CRED INVALID JSON");
-        ESP_LOGE(kTag, "credentials API returned invalid JSON");
-        return false;
-    }
-
-    const bool success = cJSON_IsTrue(
-        cJSON_GetObjectItemCaseSensitive(root, "success"));
-    credentials.client_id = JsonScalar(root, "clientId");
-    credentials.username = JsonScalar(root, "username");
-    credentials.password = JsonScalar(root, "password");
-    credentials.pub_topic = JsonScalar(root, "pubTopic");
-    credentials.subscribe_topic = JsonScalar(root, "subscribeTopic");
-    credentials.wss_url = JsonScalar(root, "wssUrl");
-    const std::string response_imei = JsonScalar(root, "imei");
-    cJSON* expires_in = cJSON_GetObjectItemCaseSensitive(root, "expiresIn");
-    credentials.expires_in = cJSON_IsNumber(expires_in)
-        ? expires_in->valueint
-        : kDefaultCredentialSeconds;
-    cJSON_Delete(root);
-
-    if (!success || response_imei != cab_guid ||
-        credentials.client_id != cab_guid || credentials.username.empty() ||
-        credentials.password.empty() ||
-        credentials.wss_url.rfind("wss://", 0) != 0) {
-        SetScreenDiagnostic("BIZ CRED INVALID FIELDS");
-        ESP_LOGE(kTag,
-                 "credentials validation failed: success=%d imei_match=%d client_match=%d user=%d password=%d wss=%d",
-                 success, response_imei == cab_guid,
-                 credentials.client_id == cab_guid,
-                 !credentials.username.empty(), !credentials.password.empty(),
-                 credentials.wss_url.rfind("wss://", 0) == 0);
-        return false;
-    }
-    if (credentials.expires_in <= 0) {
-        credentials.expires_in = kDefaultCredentialSeconds;
-    }
-
-    ESP_LOGI(kTag,
-             "credentials accepted: clientId=%s API-pub=%s API-sub=%s expiresIn=%d",
-             credentials.client_id.c_str(), credentials.pub_topic.c_str(),
-             credentials.subscribe_topic.c_str(), credentials.expires_in);
-    return true;
 }
 
 void LocationMqttClient::CloseBlueScanSocket() {
@@ -853,16 +697,13 @@ void LocationMqttClient::PollBlueScan() {
              static_cast<unsigned>(kBlueScanPort), blue_scan_sent_count_);
 }
 
-bool LocationMqttClient::StartMqtt(const Credentials& credentials,
-                                   const std::string& physical_imei,
-                                   const std::string& cab_guid) {
+bool LocationMqttClient::StartMqtt(const std::string& physical_imei) {
     StopMqtt();
     connect_error_reported_ = false;
     std::lock_guard<std::mutex> lock(mqtt_mutex_);
 
-    active_credentials_ = credentials;
     physical_imei_ = physical_imei;
-    cab_guid_ = cab_guid;
+    cab_guid_ = physical_imei_ + "s3";
     const std::string topic_prefix = "topic/" + cab_guid_ + "/";
     command_topic_ = topic_prefix + "cmd";
     event_topic_ = topic_prefix + "event";
@@ -873,21 +714,20 @@ bool LocationMqttClient::StartMqtt(const Credentials& credentials,
     }
 
     esp_mqtt_client_config_t config = {};
-    config.broker.address.uri = active_credentials_.wss_url.c_str();
+    config.broker.address.uri = kBusinessBrokerUri;
     config.broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
-    config.credentials.client_id = active_credentials_.client_id.c_str();
-    config.credentials.username = active_credentials_.username.c_str();
-    config.credentials.authentication.password =
-        active_credentials_.password.c_str();
+    config.credentials.client_id = cab_guid_.c_str();
+    config.credentials.username = JIUCHUAN_BUSINESS_MQTT_USERNAME;
+    config.credentials.authentication.password = JIUCHUAN_BUSINESS_MQTT_PASSWORD;
     config.session.keepalive = 60;
     config.network.reconnect_timeout_ms = 5000;
     config.network.timeout_ms = 15000;
     config.task.stack_size = 6144;
     config.buffer.size = 4096;
 
-    ESP_LOGI(kTag, "[CONNECT] broker=%s clientId=%s username=%s password=<hidden> keepalive=%d stack=%d buffer=%d internal_free=%u internal_largest=%u psram_free=%u",
-             BrokerAddressForLog(active_credentials_.wss_url).c_str(), active_credentials_.client_id.c_str(),
-             active_credentials_.username.c_str(), config.session.keepalive, config.task.stack_size, config.buffer.size,
+    ESP_LOGI(kTag, "[CONNECT] broker=%s clientId=%s keepalive=%d stack=%d buffer=%d internal_free=%u internal_largest=%u psram_free=%u",
+             BrokerAddressForLog(kBusinessBrokerUri).c_str(), cab_guid_.c_str(),
+             config.session.keepalive, config.task.stack_size, config.buffer.size,
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
              static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
@@ -896,7 +736,7 @@ bool LocationMqttClient::StartMqtt(const Credentials& credentials,
     if (!mqtt_client_) {
         SetScreenDiagnostic("BIZ MQTT INIT ERROR");
         ESP_LOGE(kTag, "[INIT_FAILED] broker=%s internal_free=%u internal_largest=%u",
-                 BrokerAddressForLog(active_credentials_.wss_url).c_str(),
+                 BrokerAddressForLog(kBusinessBrokerUri).c_str(),
                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
         return false;
@@ -910,7 +750,7 @@ bool LocationMqttClient::StartMqtt(const Credentials& credentials,
     if (result != ESP_OK) {
         SetScreenDiagnostic("BIZ MQTT START ERROR");
         ESP_LOGE(kTag, "[START_FAILED] broker=%s stage=%s error=%s stack=%d internal_free=%u internal_largest=%u; broker login has not started",
-                 BrokerAddressForLog(active_credentials_.wss_url).c_str(), stage, esp_err_to_name(result), config.task.stack_size,
+                 BrokerAddressForLog(kBusinessBrokerUri).c_str(), stage, esp_err_to_name(result), config.task.stack_size,
                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
         esp_mqtt_client_destroy(mqtt_client_);
@@ -918,9 +758,8 @@ bool LocationMqttClient::StartMqtt(const Credentials& credentials,
         return false;
     }
 
-    connected_ = false;
     ESP_LOGI(kTag, "[TASK_STARTED] broker=%s; waiting for broker CONNACK",
-             BrokerAddressForLog(active_credentials_.wss_url).c_str());
+             BrokerAddressForLog(kBusinessBrokerUri).c_str());
     return true;
 }
 
@@ -978,12 +817,12 @@ void LocationMqttClient::HandleMqttEvent(int32_t event_id,
                                          esp_mqtt_event_handle_t event) {
     switch (event_id) {
         case MQTT_EVENT_BEFORE_CONNECT:
-            ESP_LOGI(kTag, "[LOGIN] broker=%s clientId=%s", BrokerAddressForLog(active_credentials_.wss_url).c_str(), cab_guid_.c_str());
+            ESP_LOGI(kTag, "[LOGIN] broker=%s clientId=%s", BrokerAddressForLog(kBusinessBrokerUri).c_str(), cab_guid_.c_str());
             break;
         case MQTT_EVENT_CONNECTED:
             connected_ = true;
             SetScreenDiagnostic("BIZ MQTT ONLINE", false);
-            ESP_LOGI(kTag, "[CONNECTED] broker=%s clientId=%s CONNACK=0", BrokerAddressForLog(active_credentials_.wss_url).c_str(), cab_guid_.c_str());
+            ESP_LOGI(kTag, "[CONNECTED] broker=%s clientId=%s CONNACK=0", BrokerAddressForLog(kBusinessBrokerUri).c_str(), cab_guid_.c_str());
             SubscribeBusinessTopics(event->client);
             report_requested_ = true;
             if (task_handle_ != nullptr) {
@@ -995,10 +834,17 @@ void LocationMqttClient::HandleMqttEvent(int32_t event_id,
             incoming_topic_.clear();
             incoming_payload_.clear();
             incoming_retained_ = false;
-            ESP_LOGW(kTag, "[DISCONNECTED] broker=%s; automatic reconnect is active", BrokerAddressForLog(active_credentials_.wss_url).c_str());
+            ESP_LOGW(kTag, "[DISCONNECTED] broker=%s; automatic reconnect is active", BrokerAddressForLog(kBusinessBrokerUri).c_str());
             break;
         case MQTT_EVENT_SUBSCRIBED:
-            ESP_LOGI(kTag, "[SUBSCRIBED] broker=%s message_id=%d", BrokerAddressForLog(active_credentials_.wss_url).c_str(), event->msg_id);
+            if (event->error_handle && event->error_handle->error_type == MQTT_ERROR_TYPE_SUBSCRIBE_FAILED) {
+                SetScreenDiagnostic("BIZ MQTT SUB DENIED");
+                ESP_LOGW(kTag, "[SUB_DENIED] broker=%s message_id=%d",
+                         BrokerAddressForLog(kBusinessBrokerUri).c_str(), event->msg_id);
+            } else {
+                ESP_LOGI(kTag, "[SUBSCRIBED] broker=%s message_id=%d",
+                         BrokerAddressForLog(kBusinessBrokerUri).c_str(), event->msg_id);
+            }
             break;
         case MQTT_EVENT_ERROR:
             connected_ = false;
@@ -1015,9 +861,9 @@ void LocationMqttClient::HandleMqttEvent(int32_t event_id,
                     SetScreenDiagnostic("BIZ MQTT SUB ERROR");
                 }
                 ESP_LOGE(kTag, "[ERROR] broker=%s type=%d connack=%d tls_esp=0x%x tls_stack=%d socket_errno=%d",
-                         BrokerAddressForLog(active_credentials_.wss_url).c_str(), int(error->error_type), int(error->connect_return_code),
+                         BrokerAddressForLog(kBusinessBrokerUri).c_str(), int(error->error_type), int(error->connect_return_code),
                          int(error->esp_tls_last_esp_err), error->esp_tls_stack_err, error->esp_transport_sock_errno);
-            } else ESP_LOGE(kTag, "[ERROR] broker=%s (no error detail)", BrokerAddressForLog(active_credentials_.wss_url).c_str());
+            } else ESP_LOGE(kTag, "[ERROR] broker=%s (no error detail)", BrokerAddressForLog(kBusinessBrokerUri).c_str());
             break;
         case MQTT_EVENT_DATA:
             if (event->current_data_offset == 0) {
