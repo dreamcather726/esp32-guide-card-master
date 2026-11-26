@@ -69,6 +69,8 @@ private:
     uint64_t user_playback_baseline_seconds_ = 0;
     uint32_t user_conversation_baseline_ = 0;
     uint32_t online_report_count_ = 0;
+    int battery_level_ = 0;
+    int64_t next_battery_update_us_ = 0;
 
     static void TaskEntry(void* arg);
     static void MqttEventEntry(void* handler_args,

@@ -235,7 +235,7 @@ bool ParseRgbField(cJSON* root, const char* key, size_t led_count,
     return true;
 }
 
-std::string CommandPayloadForLog(const cJSON* root) {
+std::string PayloadForLog(const cJSON* root) {
     cJSON* copy = cJSON_Duplicate(root, true);
     if (!copy) {
         return "<unable-to-copy-json>";
@@ -567,7 +567,7 @@ void LocationMqttClient::Run() {
         }
 
         uint32_t disconnected_ms = 0;
-        uint32_t report_elapsed_seconds = 0;
+        int64_t last_report_us = esp_timer_get_time();
         while (!stop_requested_) {
             if (WaitOrStop(1000)) {
                 break;
@@ -585,13 +585,12 @@ void LocationMqttClient::Run() {
             }
 
             disconnected_ms = 0;
-            ++report_elapsed_seconds;
             if (report_requested_.exchange(false) ||
-                report_elapsed_seconds >= kOnlineReportIntervalSeconds) {
+                esp_timer_get_time() - last_report_us >= int64_t(kOnlineReportIntervalSeconds) * 1000000) {
                 QuerySignalStrength();
                 PublishOnlineReport();
                 PersistRuntimeCheckpoint();
-                report_elapsed_seconds = 0;
+                last_report_us = esp_timer_get_time();
             }
         }
 
@@ -908,8 +907,13 @@ void LocationMqttClient::UpdateGroupSubscription(
 void LocationMqttClient::HandleMqttPayload(const std::string& topic,
                                            const std::string& payload,
                                            bool retained) {
-    ESP_LOGI(kTag, "RX topic=%s payload_length=%u", topic.c_str(),
-             static_cast<unsigned>(payload.size()));
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
+        cJSON_ParseWithLength(payload.data(), payload.size()), cJSON_Delete);
+    {
+        const std::string safe_payload = root ? PayloadForLog(root.get()) : "<invalid JSON>";
+        ESP_LOGI(kTag, "[RX] topic=%s retained=%d bytes=%u payload=%s", topic.c_str(),
+                 retained, static_cast<unsigned>(payload.size()), safe_payload.c_str());
+    }
 
     std::string current_group_topic;
     {
@@ -921,16 +925,8 @@ void LocationMqttClient::HandleMqttPayload(const std::string& topic,
         return;
     }
 
-    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
-        cJSON_ParseWithLength(payload.data(), payload.size()), cJSON_Delete);
     if (!root) {
-        ESP_LOGW(kTag, "ignored non-JSON MQTT payload on %s", topic.c_str());
         return;
-    }
-    if (topic == command_topic_) {
-        const std::string safe_payload = CommandPayloadForLog(root.get());
-        ESP_LOGI(kTag, "RX command topic=%s payload=%s",
-                 topic.c_str(), safe_payload.c_str());
     }
     cJSON* message = root.get();
     cJSON* nested = cJSON_GetObjectItemCaseSensitive(root.get(), "payload");
@@ -1317,8 +1313,8 @@ bool LocationMqttClient::PublishCommandPayload(const std::string& payload) {
     const int message_id = esp_mqtt_client_publish(
         mqtt_client_, command_topic_.c_str(), payload.c_str(),
         static_cast<int>(payload.size()), 0, 0);
-    ESP_LOGI(kTag, "TX topic=%s message_id=%d payload_length=%u",
-             command_topic_.c_str(), message_id, static_cast<unsigned>(payload.size()));
+    ESP_LOGI(kTag, "[TX] topic=%s message_id=%d payload=%s",
+             command_topic_.c_str(), message_id, payload.c_str());
     return message_id >= 0;
 }
 
@@ -1410,11 +1406,16 @@ bool LocationMqttClient::PublishOnlineReport() {
         conversation_baseline = user_conversation_baseline_;
     }
 
-    int battery_level = 0;
-    bool charging = false;
-    bool discharging = false;
-    board_.GetBatteryLevel(battery_level, charging, discharging);
-    battery_level = std::clamp(battery_level, 0, 100);
+    const int64_t now_us = esp_timer_get_time();
+    if (now_us >= next_battery_update_us_) {
+        int level = 0;
+        bool charging = false;
+        bool discharging = false;
+        if (board_.GetBatteryLevel(level, charging, discharging)) {
+            battery_level_ = std::clamp(level, 0, 100);
+        }
+        next_battery_update_us_ = now_us + int64_t(kOnlineReportIntervalSeconds) * 1000000;
+    }
     int volume_percent = 0;
     if (auto* codec = board_.GetAudioCodec()) {
         volume_percent = std::clamp(codec->output_volume(), 0, 80) * 100 / 80;
@@ -1428,7 +1429,6 @@ bool LocationMqttClient::PublishOnlineReport() {
     uint64_t remaining_kb = 0;
     GetSdCardSpaceKb(capacity_kb, remaining_kb);
 
-    const int64_t now_us = esp_timer_get_time();
     const uint64_t session_seconds = static_cast<uint64_t>(
         std::max<int64_t>(0, now_us) / 1000000);
     const uint64_t total_runtime_seconds =
@@ -1469,7 +1469,7 @@ bool LocationMqttClient::PublishOnlineReport() {
     cJSON_AddNumberToObject(root, "bindingVersion", static_cast<double>(binding.version));
     AddString(root, "usageSessionID", binding.usage_session_id);
     AddString(root, "fwVersion", firmware_version);
-    AddString(root, "Battery Level", std::to_string(battery_level));
+    AddString(root, "Battery Level", std::to_string(battery_level_));
     AddString(root, "Volume", std::to_string(volume_percent));
     AddString(root, "Screen Brightness", std::to_string(screen_brightness));
     AddString(root, "Signal Strength", signal_strength);
@@ -1493,7 +1493,7 @@ bool LocationMqttClient::PublishOnlineReport() {
     const std::string online_topic = "topic/" + cab_guid_ + "/online";
     const int message_id = esp_mqtt_client_publish(
         mqtt_client_, online_topic.c_str(), payload, 0, 0, 0);
-    ESP_LOGI(kTag, "TX topic=%s message_id=%d payload=%s",
+    ESP_LOGI(kTag, "[TX] topic=%s message_id=%d payload=%s",
              online_topic.c_str(), message_id, payload);
     cJSON_free(payload);
     if (message_id >= 0) {

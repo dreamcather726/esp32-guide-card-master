@@ -200,7 +200,8 @@ struct RndisBoard {
     struct Codec { int output_volume() const { return 40; } };
     struct Backlight { int brightness() const { return 70; } };
     Binding GetUserBinding() const { return {}; }
-    bool GetBatteryLevel(int& level, bool&, bool&) const { level = 76; return true; }
+    int battery_level = 76;
+    bool GetBatteryLevel(int& level, bool&, bool&) const { level = battery_level; return true; }
     Codec* GetAudioCodec() const { return nullptr; }
     Backlight* GetBacklight() const { return nullptr; }
 };
@@ -310,7 +311,14 @@ int main() {
             assert(cJSON_IsArray(array));
             return array;
         };
+        const auto battery = [](const cJSON* json) {
+            const char* level = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json, "Battery Level"));
+            assert(level);
+            return std::string(level);
+        };
         const auto json = report();
+        assert(battery(json.get()) == "76");
+        assert(logs.find("[TX] topic=" + online_topic + " message_id=1 payload=" + online_payload) != std::string::npos);
         assert(cJSON_GetArraySize(beacons(json.get())) == 0);
         assert(board.display.report_diagnostic == "KJ TX #1 BLE=0" && !board.display.report_fault);
         assert(std::string(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(json.get(), "macAddress"))) == "AA:BB:CC:DD:EE:FF");
@@ -323,7 +331,9 @@ int main() {
         now_us += 5LL * 1000000;
         assert(LocationMqttClient::RecordBleBeacon("D9:62:62:00:00:0D", -70));
 
+        board.battery_level = 75;
         const auto matched = report();
+        assert(battery(matched.get()) == "76");
         const auto* samples = beacons(matched.get());
         assert(cJSON_GetArraySize(samples) == 2);
         const auto* first = cJSON_GetArrayItem(samples, 0);
@@ -332,6 +342,11 @@ int main() {
         const auto* second = cJSON_GetArrayItem(samples, 1);
         assert(std::string(cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(second, "macAddress"))) == "00:D9:62:62:00:0F");
         assert(board.display.report_diagnostic == "KJ TX #2 BLE=2" && !board.display.report_fault);
+
+        now_us = first_seen + 60LL * 1000000 - 1;
+        assert(battery(report().get()) == "76");
+        ++now_us;
+        assert(battery(report().get()) == "75");
 
         now_us = first_seen + 90LL * 1000000;
         const auto partly_expired = report();
